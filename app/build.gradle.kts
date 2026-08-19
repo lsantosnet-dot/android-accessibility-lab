@@ -1,3 +1,7 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -13,6 +17,13 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        // Stamped at each Gradle sync/build so the overlay can show proof of which build is running.
+        buildConfigField(
+            "String",
+            "BUILD_TIMESTAMP",
+            "\"${SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())}\"",
+        )
     }
 
     buildTypes {
@@ -33,6 +44,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
