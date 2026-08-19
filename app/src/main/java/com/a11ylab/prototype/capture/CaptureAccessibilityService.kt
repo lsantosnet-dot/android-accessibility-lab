@@ -16,6 +16,9 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        // Overlay permission may have been granted after the service connected — retry
+        // here so the panel appears without requiring the user to toggle the service.
+        overlayManager.show()
         CaptureBus.push(
             CaptureEvent(
                 timestampMillis = System.currentTimeMillis(),
