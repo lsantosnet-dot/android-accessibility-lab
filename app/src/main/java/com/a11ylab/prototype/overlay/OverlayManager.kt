@@ -1,10 +1,12 @@
 package com.a11ylab.prototype.overlay
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
@@ -37,12 +39,13 @@ class OverlayManager(private val context: Context) {
     private var logContainer: LinearLayout? = null
     private var pauseButton: Button? = null
 
+    /** True once the user taps the close button — [show] won't re-create the panel until the service reconnects. */
+    private var dismissed = false
+
     fun show() {
+        if (dismissed) return
         if (rootView != null) return
         if (!Settings.canDrawOverlays(context)) return
-
-        val container = buildView()
-        rootView = container
 
         val params = WindowManager.LayoutParams(
             dpToPx(280),
@@ -55,6 +58,8 @@ class OverlayManager(private val context: Context) {
             x = dpToPx(12)
             y = dpToPx(64)
         }
+        val container = buildView(params)
+        rootView = container
 
         windowManager.addView(container, params)
 
@@ -76,7 +81,14 @@ class OverlayManager(private val context: Context) {
         scope.coroutineContext[Job]?.cancel()
     }
 
-    private fun buildView(): View {
+    /** User-initiated close: same teardown as [hide], but keeps the panel from popping back up. */
+    private fun close() {
+        dismissed = true
+        hide()
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun buildView(params: WindowManager.LayoutParams): View {
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dpToPx(12))
@@ -95,11 +107,18 @@ class OverlayManager(private val context: Context) {
                 text = "limpar"
                 setOnClickListener { CaptureBus.clear() }
             }
+            val closeButton = Button(context).apply {
+                text = "✕"
+                setOnClickListener { close() }
+            }
             pauseButton = pause
 
             addView(title)
             addView(pause)
             addView(clear)
+            addView(closeButton)
+
+            setOnTouchListener(DragHandler(params))
         }
 
         val log = LinearLayout(context).apply {
@@ -150,4 +169,31 @@ class OverlayManager(private val context: Context) {
     }
 
     private fun dpToPx(dp: Int): Int = (dp * context.resources.displayMetrics.density).toInt()
+
+    /** Lets the user drag the panel by its header; updates [params] and re-lays out the window as the finger moves. */
+    private inner class DragHandler(private val params: WindowManager.LayoutParams) : View.OnTouchListener {
+        private var initialX = 0
+        private var initialY = 0
+        private var initialTouchX = 0f
+        private var initialTouchY = 0f
+
+        override fun onTouch(view: View, event: MotionEvent): Boolean {
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    rootView?.let { windowManager.updateViewLayout(it, params) }
+                    return true
+                }
+            }
+            return false
+        }
+    }
 }
