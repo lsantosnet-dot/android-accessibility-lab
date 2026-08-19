@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Typeface
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -15,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.core.view.setPadding
+import com.a11ylab.prototype.BuildConfig
 import com.a11ylab.prototype.capture.CaptureBus
 import com.a11ylab.prototype.capture.CaptureEvent
 import kotlinx.coroutines.CoroutineScope
@@ -90,16 +92,34 @@ class OverlayManager(private val context: Context) {
 
     @SuppressLint("ClickableViewAccessibility")
     private fun buildView(params: WindowManager.LayoutParams): View {
-        val header = LinearLayout(context).apply {
+        val titleBar = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dpToPx(12))
+            setPadding(dpToPx(12), dpToPx(8), dpToPx(12), dpToPx(2))
 
-            val title = TextView(context).apply {
+            val appName = TextView(context).apply {
                 text = "Accessibility Lab"
                 setTextColor(Color.WHITE)
                 textSize = 13f
+                setTypeface(typeface, Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
+            val version = TextView(context).apply {
+                text = "v${BuildConfig.VERSION_NAME} · ${BuildConfig.BUILD_TIMESTAMP}"
+                setTextColor(Color.parseColor("#888888"))
+                textSize = 10f
+            }
+
+            addView(appName)
+            addView(version)
+
+            // Drag handle lives on the title bar only, so it doesn't fight the buttons below for touches.
+            setOnTouchListener(DragHandler(params))
+        }
+
+        val controls = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(8))
+
             val pause = Button(context).apply {
                 text = "⏸"
                 setOnClickListener { CaptureBus.togglePaused() }
@@ -114,12 +134,9 @@ class OverlayManager(private val context: Context) {
             }
             pauseButton = pause
 
-            addView(title)
             addView(pause)
             addView(clear)
             addView(closeButton)
-
-            setOnTouchListener(DragHandler(params))
         }
 
         val log = LinearLayout(context).apply {
@@ -139,7 +156,8 @@ class OverlayManager(private val context: Context) {
         return LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#F0101418"))
-            addView(header)
+            addView(titleBar)
+            addView(controls)
             addView(scrollView)
         }
     }
