@@ -63,7 +63,10 @@ class MainActivity : ComponentActivity() {
         ) ?: return false
 
         val splitter = TextUtils.SimpleStringSplitter(':').apply { setString(enabledServices) }
-        return splitter.asSequence().any { it.equals(expected, ignoreCase = true) }
+        for (name in splitter) {
+            if (name.equals(expected, ignoreCase = true)) return true
+        }
+        return false
     }
 
     private val ComponentNameString: String
