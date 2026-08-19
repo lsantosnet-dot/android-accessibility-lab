@@ -8,6 +8,7 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.View.MeasureSpec
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -127,10 +128,10 @@ class OverlayManager(private val context: Context) {
         }
         logContainer = log
 
-        val scrollView = ScrollView(context).apply {
+        val scrollView = BoundedScrollView(context, maxHeightPx = dpToPx(260)).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dpToPx(260),
+                LinearLayout.LayoutParams.WRAP_CONTENT,
             )
             addView(log)
         }
@@ -169,6 +170,14 @@ class OverlayManager(private val context: Context) {
     }
 
     private fun dpToPx(dp: Int): Int = (dp * context.resources.displayMetrics.density).toInt()
+
+    /** Shrinks to fit its content, up to [maxHeightPx], instead of always claiming a fixed height. */
+    private class BoundedScrollView(context: Context, private val maxHeightPx: Int) : ScrollView(context) {
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            val boundedHeightSpec = MeasureSpec.makeMeasureSpec(maxHeightPx, MeasureSpec.AT_MOST)
+            super.onMeasure(widthMeasureSpec, boundedHeightSpec)
+        }
+    }
 
     /** Lets the user drag the panel by its header; updates [params] and re-lays out the window as the finger moves. */
     private inner class DragHandler(private val params: WindowManager.LayoutParams) : View.OnTouchListener {
