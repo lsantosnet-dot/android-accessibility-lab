@@ -52,6 +52,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         val enabling = !CaptureBus.isAutoScrollReading.value
         CaptureBus.setAutoScrollReading(enabling)
         Log.d(TAG, "autoScrollReading=$enabling")
+        overlayManager.setKeepScreenOn(enabling)
         if (enabling) {
             lastAutoScrollText = null
             screenReader.onReadingFinished = { mainHandler.post(::onAutoScrollChunkFinished) }
@@ -88,6 +89,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     private fun stopAutoScroll() {
         CaptureBus.setAutoScrollReading(false)
         screenReader.onReadingFinished = null
+        overlayManager.setKeepScreenOn(false)
     }
 
     private fun captureForegroundText(): String? {
@@ -164,6 +166,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     private fun stopReading() {
         CaptureBus.setAutoScrollReading(false)
         mainHandler.removeCallbacksAndMessages(null)
+        if (::overlayManager.isInitialized) overlayManager.setKeepScreenOn(false)
         if (::screenReader.isInitialized) {
             screenReader.onReadingFinished = null
             screenReader.stop()
