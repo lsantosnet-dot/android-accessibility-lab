@@ -112,7 +112,35 @@ class ScreenReader(context: Context) {
             tts.setLanguage(Locale.getDefault())
         }
 
-        val speakResult = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
-        Log.d(TAG, "speak() invoked for ${text.length} chars, result=$speakResult")
+        // TextToSpeech.speak() rejects the whole call (result=ERROR, nothing spoken) once text
+        // exceeds its max input length — long article pages routinely blow past that in one string.
+        val maxChunkLength = TextToSpeech.getMaxSpeechInputLength() - 100
+        val chunks = chunkText(text, maxChunkLength)
+        Log.d(TAG, "speak(): ${text.length} chars split into ${chunks.size} chunk(s), max=$maxChunkLength")
+
+        chunks.forEachIndexed { index, chunk ->
+            val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            val speakResult = tts.speak(chunk, queueMode, null, "$UTTERANCE_ID-$index")
+            Log.d(TAG, "speak() chunk $index (${chunk.length} chars) result=$speakResult")
+        }
+    }
+
+    /** Splits [text] into pieces no longer than [maxLength], breaking on spaces to avoid cutting words. */
+    private fun chunkText(text: String, maxLength: Int): List<String> {
+        if (text.length <= maxLength) return listOf(text)
+
+        val chunks = mutableListOf<String>()
+        var start = 0
+        while (start < text.length) {
+            var end = (start + maxLength).coerceAtMost(text.length)
+            if (end < text.length) {
+                val lastSpace = text.lastIndexOf(' ', end)
+                if (lastSpace > start) end = lastSpace
+            }
+            val chunk = text.substring(start, end).trim()
+            if (chunk.isNotEmpty()) chunks.add(chunk)
+            start = end
+        }
+        return chunks
     }
 }
