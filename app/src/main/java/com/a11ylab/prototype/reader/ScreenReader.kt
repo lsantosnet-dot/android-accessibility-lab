@@ -2,9 +2,12 @@ package com.a11ylab.prototype.reader
 
 import android.content.Context
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import java.util.Locale
 
+private const val TAG = "ScreenReader"
 private const val UTTERANCE_ID = "a11ylab-read-screen"
 
 /**
@@ -20,13 +23,36 @@ class ScreenReader(context: Context) {
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
         ttsReady = status == TextToSpeech.SUCCESS
+        Log.d(TAG, "TTS init finished: status=$status ready=$ttsReady")
         if (ttsReady) pendingText?.let { speakWithDetectedLanguage(it) }
         pendingText = null
     }
 
+    init {
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                Log.d(TAG, "speak started")
+            }
+
+            override fun onDone(utteranceId: String?) {
+                Log.d(TAG, "speak finished")
+            }
+
+            @Suppress("DEPRECATION")
+            override fun onError(utteranceId: String?) {
+                Log.e(TAG, "speak failed (utteranceId=$utteranceId)")
+            }
+        })
+    }
+
     fun read(text: String) {
-        if (text.isBlank()) return
+        Log.d(TAG, "read() called with ${text.length} chars, ttsReady=$ttsReady")
+        if (text.isBlank()) {
+            Log.w(TAG, "read() got no text to speak — nothing was captured from the screen")
+            return
+        }
         if (!ttsReady) {
+            Log.w(TAG, "TTS not ready yet, queuing text for when init finishes")
             pendingText = text
             return
         }
@@ -45,8 +71,14 @@ class ScreenReader(context: Context) {
 
     private fun speakWithDetectedLanguage(text: String) {
         languageIdentifier.identifyLanguage(text)
-            .addOnSuccessListener { languageCode -> speak(text, languageCode) }
-            .addOnFailureListener { speak(text, languageCode = null) }
+            .addOnSuccessListener { languageCode ->
+                Log.d(TAG, "language detected: $languageCode")
+                speak(text, languageCode)
+            }
+            .addOnFailureListener { error ->
+                Log.e(TAG, "language detection failed, falling back to device locale", error)
+                speak(text, languageCode = null)
+            }
     }
 
     private fun speak(text: String, languageCode: String?) {
@@ -56,10 +88,13 @@ class ScreenReader(context: Context) {
             ?: Locale.getDefault()
 
         val result = tts.setLanguage(locale)
+        Log.d(TAG, "setLanguage($locale) result=$result")
         if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+            Log.w(TAG, "locale $locale unavailable, falling back to ${Locale.getDefault()}")
             tts.setLanguage(Locale.getDefault())
         }
 
-        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        val speakResult = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        Log.d(TAG, "speak() invoked for ${text.length} chars, result=$speakResult")
     }
 }

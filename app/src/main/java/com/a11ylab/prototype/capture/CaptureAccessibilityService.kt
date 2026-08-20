@@ -1,10 +1,13 @@
 package com.a11ylab.prototype.capture
 
 import android.accessibilityservice.AccessibilityService
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.a11ylab.prototype.overlay.OverlayManager
 import com.a11ylab.prototype.reader.ScreenReader
+
+private const val TAG = "CaptureService"
 
 class CaptureAccessibilityService : AccessibilityService() {
 
@@ -20,10 +23,15 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     /** Reads everything currently loaded in the active window's accessibility tree aloud. */
     private fun readScreen() {
-        val root = rootInActiveWindow ?: return
+        val root = rootInActiveWindow
+        if (root == null) {
+            Log.w(TAG, "readScreen: rootInActiveWindow is null, nothing to read")
+            return
+        }
         val text = StringBuilder()
         collectText(root, text)
         root.recycle()
+        Log.d(TAG, "readScreen: collected ${text.length} chars")
         screenReader.read(text.toString())
     }
 
