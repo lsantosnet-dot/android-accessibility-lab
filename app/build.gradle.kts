@@ -62,4 +62,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
+
+    // On-device language detection, used to pick the right TTS voice for the read-screen feature.
+    implementation("com.google.mlkit:language-id:17.0.6")
 }

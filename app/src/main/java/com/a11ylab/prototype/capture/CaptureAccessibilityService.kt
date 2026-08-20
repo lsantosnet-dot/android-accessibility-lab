@@ -4,15 +4,44 @@ import android.accessibilityservice.AccessibilityService
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.a11ylab.prototype.overlay.OverlayManager
+import com.a11ylab.prototype.reader.ScreenReader
 
 class CaptureAccessibilityService : AccessibilityService() {
 
     private lateinit var overlayManager: OverlayManager
+    private lateinit var screenReader: ScreenReader
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        overlayManager = OverlayManager(this)
+        screenReader = ScreenReader(this)
+        overlayManager = OverlayManager(this, onReadScreen = ::readScreen, onStopReading = ::stopReading)
         overlayManager.show()
+    }
+
+    /** Reads everything currently loaded in the active window's accessibility tree aloud. */
+    private fun readScreen() {
+        val root = rootInActiveWindow ?: return
+        val text = StringBuilder()
+        collectText(root, text)
+        root.recycle()
+        screenReader.read(text.toString())
+    }
+
+    private fun collectText(node: AccessibilityNodeInfo, into: StringBuilder) {
+        val text = extractText(node)
+        if (text.isNotBlank()) {
+            if (into.isNotEmpty()) into.append(". ")
+            into.append(text)
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectText(child, into)
+            child.recycle()
+        }
+    }
+
+    private fun stopReading() {
+        if (::screenReader.isInitialized) screenReader.stop()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -48,5 +77,6 @@ class CaptureAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
         if (::overlayManager.isInitialized) overlayManager.hide()
+        if (::screenReader.isInitialized) screenReader.shutdown()
     }
 }

@@ -32,7 +32,11 @@ import java.util.Locale
  * hosting Compose outside an Activity needs manual Lifecycle/SavedState plumbing that
  * would distract from the point of this prototype: the AccessibilityService itself.
  */
-class OverlayManager(private val context: Context) {
+class OverlayManager(
+    private val context: Context,
+    private val onReadScreen: () -> Unit,
+    private val onStopReading: () -> Unit,
+) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val scope = CoroutineScope(Dispatchers.Main.immediate + Job())
@@ -116,6 +120,23 @@ class OverlayManager(private val context: Context) {
             setOnTouchListener(DragHandler(params))
         }
 
+        val readerControls = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(2))
+
+            val readButton = Button(context).apply {
+                text = "🔊 ler tela"
+                setOnClickListener { onReadScreen() }
+            }
+            val stopButton = Button(context).apply {
+                text = "⏹"
+                setOnClickListener { onStopReading() }
+            }
+
+            addView(readButton)
+            addView(stopButton)
+        }
+
         val controls = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(8))
@@ -157,6 +178,7 @@ class OverlayManager(private val context: Context) {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#F0101418"))
             addView(titleBar)
+            addView(readerControls)
             addView(controls)
             addView(scrollView)
         }
