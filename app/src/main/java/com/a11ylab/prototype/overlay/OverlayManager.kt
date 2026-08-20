@@ -107,18 +107,26 @@ class OverlayManager(
     }
 
     /**
-     * Keeps the display on while auto-scroll reading runs — with the screen off, the
-     * foreground app's Activity pauses and stops responding to programmatic scroll actions,
-     * silently ending the loop. TalkBack sidesteps this with real touch-exploration input;
-     * we don't have that, so we just don't let the screen sleep during a reading session.
+     * Keeps the display on (but dimmed to near-black) while auto-scroll reading runs — with
+     * the screen off, the foreground app's Activity pauses and stops responding to
+     * programmatic scroll actions, silently ending the loop. TalkBack sidesteps this with
+     * real touch-exploration input; we don't have that, so we just don't let the screen sleep
+     * during a reading session. Dimming keeps most of the battery savings a real screen-off
+     * would have given. Both the keep-on flag and the brightness override are cleared the
+     * moment auto-scroll stops — however it stops — so the screen returns to normal on its own.
      */
-    fun setKeepScreenOn(enabled: Boolean) {
+    fun setKeepScreenOnDimmed(enabled: Boolean) {
         val view = rootView ?: return
         val params = layoutParams ?: return
         params.flags = if (enabled) {
             params.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
         } else {
             params.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+        }
+        params.screenBrightness = if (enabled) {
+            0.0f
+        } else {
+            WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
         }
         windowManager.updateViewLayout(view, params)
     }
