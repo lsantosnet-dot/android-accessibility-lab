@@ -33,7 +33,9 @@ class ScreenReader(context: Context) {
     /** Fires once per [read] call (success or failure) after every one of its chunks has finished. */
     var onReadingFinished: (() -> Unit)? = null
 
-    private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
+    private val tts: TextToSpeech = TextToSpeech(context.applicationContext, ::onTtsInitFinished)
+
+    private fun onTtsInitFinished(status: Int) {
         ttsReady = status == TextToSpeech.SUCCESS
         Log.d(TAG, "TTS init finished: status=$status ready=$ttsReady")
         if (ttsReady) {
