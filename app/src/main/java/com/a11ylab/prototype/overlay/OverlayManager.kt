@@ -48,6 +48,7 @@ class OverlayManager(
     private val formatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault())
 
     private var rootView: View? = null
+    private var layoutParams: WindowManager.LayoutParams? = null
     private var logContainer: LinearLayout? = null
     private var pauseButton: Button? = null
     private var autoScrollButton: Button? = null
@@ -76,6 +77,7 @@ class OverlayManager(
         }
         val container = buildView(params)
         rootView = container
+        layoutParams = params
 
         windowManager.addView(container, params)
 
@@ -97,10 +99,36 @@ class OverlayManager(
     fun hide() {
         rootView?.let { windowManager.removeView(it) }
         rootView = null
+        layoutParams = null
         logContainer = null
         pauseButton = null
         autoScrollButton = null
         scope.coroutineContext[Job]?.cancel()
+    }
+
+    /**
+     * Keeps the display on (but dimmed to near-black) while auto-scroll reading runs — with
+     * the screen off, the foreground app's Activity pauses and stops responding to
+     * programmatic scroll actions, silently ending the loop. TalkBack sidesteps this with
+     * real touch-exploration input; we don't have that, so we just don't let the screen sleep
+     * during a reading session. Dimming keeps most of the battery savings a real screen-off
+     * would have given. Both the keep-on flag and the brightness override are cleared the
+     * moment auto-scroll stops — however it stops — so the screen returns to normal on its own.
+     */
+    fun setKeepScreenOnDimmed(enabled: Boolean) {
+        val view = rootView ?: return
+        val params = layoutParams ?: return
+        params.flags = if (enabled) {
+            params.flags or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        } else {
+            params.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON.inv()
+        }
+        params.screenBrightness = if (enabled) {
+            0.0f
+        } else {
+            WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        }
+        windowManager.updateViewLayout(view, params)
     }
 
     /** User-initiated close: same teardown as [hide], but keeps the panel from popping back up. */
