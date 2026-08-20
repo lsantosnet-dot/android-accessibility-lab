@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import com.a11ylab.prototype.overlay.OverlayManager
 import com.a11ylab.prototype.reader.ScreenReader
 
@@ -17,15 +18,21 @@ class CaptureAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         screenReader = ScreenReader(this)
-        overlayManager = OverlayManager(this, onReadScreen = ::readScreen, onStopReading = ::stopReading)
+        overlayManager = OverlayManager(
+            context = this,
+            onReadScreen = ::readScreen,
+            onStopReading = ::stopReading,
+            onAdjustRate = { delta -> screenReader.adjustRate(delta) },
+            onAdjustPitch = { delta -> screenReader.adjustPitch(delta) },
+        )
         overlayManager.show()
     }
 
-    /** Reads everything currently loaded in the active window's accessibility tree aloud. */
+    /** Reads everything currently loaded in the foreground app's accessibility tree aloud. */
     private fun readScreen() {
-        val root = rootInActiveWindow
+        val root = findForegroundAppRoot()
         if (root == null) {
-            Log.w(TAG, "readScreen: rootInActiveWindow is null, nothing to read")
+            Log.w(TAG, "readScreen: no foreground app window found, nothing to read")
             return
         }
         val text = StringBuilder()
@@ -33,6 +40,23 @@ class CaptureAccessibilityService : AccessibilityService() {
         root.recycle()
         Log.d(TAG, "readScreen: collected ${text.length} chars")
         screenReader.read(text.toString())
+    }
+
+    /**
+     * rootInActiveWindow can resolve to our own overlay right after the user taps its "ler
+     * tela" button — that tap is what most recently made a window "active". Look at every
+     * window instead and pick the foreground app one explicitly, skipping our own package.
+     */
+    private fun findForegroundAppRoot(): AccessibilityNodeInfo? {
+        for (window in windows) {
+            if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+            val root = window.root
+            if (root != null && root.packageName?.toString() != packageName) {
+                return root
+            }
+            root?.recycle()
+        }
+        return null
     }
 
     private fun collectText(node: AccessibilityNodeInfo, into: StringBuilder) {

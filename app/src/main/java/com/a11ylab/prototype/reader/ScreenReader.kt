@@ -9,6 +9,8 @@ import java.util.Locale
 
 private const val TAG = "ScreenReader"
 private const val UTTERANCE_ID = "a11ylab-read-screen"
+private const val MIN_SPEECH_PARAM = 0.5f
+private const val MAX_SPEECH_PARAM = 2.0f
 
 /**
  * Speaks captured screen text aloud, auto-picking the TTS voice's language via on-device
@@ -20,6 +22,8 @@ class ScreenReader(context: Context) {
     private val languageIdentifier = LanguageIdentification.getClient()
     private var ttsReady = false
     private var pendingText: String? = null
+    private var rate = 1.0f
+    private var pitch = 1.0f
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
         ttsReady = status == TextToSpeech.SUCCESS
@@ -61,6 +65,20 @@ class ScreenReader(context: Context) {
 
     fun stop() {
         tts.stop()
+    }
+
+    /** Adjusts speech rate by [delta] (clamped to a sane range) and returns the new value. */
+    fun adjustRate(delta: Float): Float {
+        rate = (rate + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
+        tts.setSpeechRate(rate)
+        return rate
+    }
+
+    /** Adjusts pitch by [delta] (clamped to a sane range) and returns the new value. */
+    fun adjustPitch(delta: Float): Float {
+        pitch = (pitch + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
+        tts.setPitch(pitch)
+        return pitch
     }
 
     fun shutdown() {
