@@ -11,6 +11,9 @@ private const val TAG = "ScreenReader"
 private const val UTTERANCE_ID = "a11ylab-read-screen"
 private const val MIN_SPEECH_PARAM = 0.5f
 private const val MAX_SPEECH_PARAM = 2.0f
+private const val PREFS_NAME = "screen_reader_prefs"
+private const val KEY_RATE = "rate"
+private const val KEY_PITCH = "pitch"
 
 /**
  * Speaks captured screen text aloud, auto-picking the TTS voice's language via on-device
@@ -20,15 +23,24 @@ private const val MAX_SPEECH_PARAM = 2.0f
 class ScreenReader(context: Context) {
 
     private val languageIdentifier = LanguageIdentification.getClient()
+    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private var ttsReady = false
     private var pendingText: String? = null
-    private var rate = 1.0f
-    private var pitch = 1.0f
+    private var rate = prefs.getFloat(KEY_RATE, 1.0f)
+    private var pitch = prefs.getFloat(KEY_PITCH, 1.0f)
+    private var lastUtteranceId: String? = null
+
+    /** Fires once per [read] call (success or failure) after every one of its chunks has finished. */
+    var onReadingFinished: (() -> Unit)? = null
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
         ttsReady = status == TextToSpeech.SUCCESS
         Log.d(TAG, "TTS init finished: status=$status ready=$ttsReady")
-        if (ttsReady) pendingText?.let { speakWithDetectedLanguage(it) }
+        if (ttsReady) {
+            tts.setSpeechRate(rate)
+            tts.setPitch(pitch)
+            pendingText?.let { speakWithDetectedLanguage(it) }
+        }
         pendingText = null
     }
 
@@ -40,13 +52,19 @@ class ScreenReader(context: Context) {
 
             override fun onDone(utteranceId: String?) {
                 Log.d(TAG, "speak finished")
+                notifyIfLastChunk(utteranceId)
             }
 
             @Suppress("DEPRECATION")
             override fun onError(utteranceId: String?) {
                 Log.e(TAG, "speak failed (utteranceId=$utteranceId)")
+                notifyIfLastChunk(utteranceId)
             }
         })
+    }
+
+    private fun notifyIfLastChunk(utteranceId: String?) {
+        if (utteranceId != null && utteranceId == lastUtteranceId) onReadingFinished?.invoke()
     }
 
     fun read(text: String) {
@@ -67,17 +85,19 @@ class ScreenReader(context: Context) {
         tts.stop()
     }
 
-    /** Adjusts speech rate by [delta] (clamped to a sane range) and returns the new value. */
+    /** Adjusts speech rate by [delta] (clamped to a sane range), persists it, and returns the new value. */
     fun adjustRate(delta: Float): Float {
         rate = (rate + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
         tts.setSpeechRate(rate)
+        prefs.edit().putFloat(KEY_RATE, rate).apply()
         return rate
     }
 
-    /** Adjusts pitch by [delta] (clamped to a sane range) and returns the new value. */
+    /** Adjusts pitch by [delta] (clamped to a sane range), persists it, and returns the new value. */
     fun adjustPitch(delta: Float): Float {
         pitch = (pitch + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
         tts.setPitch(pitch)
+        prefs.edit().putFloat(KEY_PITCH, pitch).apply()
         return pitch
     }
 
@@ -118,6 +138,7 @@ class ScreenReader(context: Context) {
         val chunks = chunkText(text, maxChunkLength)
         Log.d(TAG, "speak(): ${text.length} chars split into ${chunks.size} chunk(s), max=$maxChunkLength")
 
+        lastUtteranceId = "$UTTERANCE_ID-${chunks.lastIndex}"
         chunks.forEachIndexed { index, chunk ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             val speakResult = tts.speak(chunk, queueMode, null, "$UTTERANCE_ID-$index")
