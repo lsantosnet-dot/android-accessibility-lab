@@ -14,6 +14,9 @@ object CaptureBus {
     private val _isPaused = MutableStateFlow(false)
     val isPaused = _isPaused.asStateFlow()
 
+    private val _isAutoScrollReading = MutableStateFlow(false)
+    val isAutoScrollReading = _isAutoScrollReading.asStateFlow()
+
     fun push(event: CaptureEvent) {
         if (_isPaused.value) return
         _events.update { current -> (listOf(event) + current).take(MAX_EVENTS) }
@@ -25,5 +28,9 @@ object CaptureBus {
 
     fun togglePaused() {
         _isPaused.update { !it }
+    }
+
+    fun setAutoScrollReading(enabled: Boolean) {
+        _isAutoScrollReading.value = enabled
     }
 }

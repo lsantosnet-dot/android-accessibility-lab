@@ -1,6 +1,8 @@
 package com.a11ylab.prototype.capture
 
 import android.accessibilityservice.AccessibilityService
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -10,10 +12,16 @@ import com.a11ylab.prototype.reader.ScreenReader
 
 private const val TAG = "CaptureService"
 
+/** Gives a scrolled screen a moment to finish laying out new content before it's captured. */
+private const val SCROLL_SETTLE_DELAY_MS = 500L
+
 class CaptureAccessibilityService : AccessibilityService() {
 
     private lateinit var overlayManager: OverlayManager
     private lateinit var screenReader: ScreenReader
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var lastAutoScrollText: String? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -24,22 +32,95 @@ class CaptureAccessibilityService : AccessibilityService() {
             onStopReading = ::stopReading,
             onAdjustRate = { delta -> screenReader.adjustRate(delta) },
             onAdjustPitch = { delta -> screenReader.adjustPitch(delta) },
+            onToggleAutoScroll = ::toggleAutoScroll,
         )
         overlayManager.show()
     }
 
     /** Reads everything currently loaded in the foreground app's accessibility tree aloud. */
     private fun readScreen() {
-        val root = findForegroundAppRoot()
-        if (root == null) {
-            Log.w(TAG, "readScreen: no foreground app window found, nothing to read")
+        val text = captureForegroundText()
+        if (text.isNullOrBlank()) {
+            Log.w(TAG, "readScreen: nothing to read")
             return
         }
+        screenReader.read(text)
+    }
+
+    /** Starts/stops continuous reading: read the screen, scroll on, read again, until stopped or content stops changing. */
+    private fun toggleAutoScroll() {
+        val enabling = !CaptureBus.isAutoScrollReading.value
+        CaptureBus.setAutoScrollReading(enabling)
+        Log.d(TAG, "autoScrollReading=$enabling")
+        if (enabling) {
+            lastAutoScrollText = null
+            screenReader.onReadingFinished = { mainHandler.post(::onAutoScrollChunkFinished) }
+            readAndTrackAutoScroll()
+        } else {
+            screenReader.onReadingFinished = null
+            mainHandler.removeCallbacksAndMessages(null)
+            screenReader.stop()
+        }
+    }
+
+    private fun onAutoScrollChunkFinished() {
+        if (!CaptureBus.isAutoScrollReading.value) return
+        if (!scrollForward()) {
+            Log.d(TAG, "auto-scroll: can't scroll further, stopping")
+            stopAutoScroll()
+            return
+        }
+        mainHandler.postDelayed({ readAndTrackAutoScroll() }, SCROLL_SETTLE_DELAY_MS)
+    }
+
+    private fun readAndTrackAutoScroll() {
+        if (!CaptureBus.isAutoScrollReading.value) return
+        val text = captureForegroundText()
+        if (text.isNullOrBlank() || text == lastAutoScrollText) {
+            Log.d(TAG, "auto-scroll: no new content, stopping")
+            stopAutoScroll()
+            return
+        }
+        lastAutoScrollText = text
+        screenReader.read(text)
+    }
+
+    private fun stopAutoScroll() {
+        CaptureBus.setAutoScrollReading(false)
+        screenReader.onReadingFinished = null
+    }
+
+    private fun captureForegroundText(): String? {
+        val root = findForegroundAppRoot() ?: return null
         val text = StringBuilder()
         collectText(root, text)
         root.recycle()
-        Log.d(TAG, "readScreen: collected ${text.length} chars")
-        screenReader.read(text.toString())
+        Log.d(TAG, "captureForegroundText: collected ${text.length} chars")
+        return text.toString()
+    }
+
+    /** Scrolls the foreground app's nearest scrollable container forward. Returns false at the end of content. */
+    private fun scrollForward(): Boolean {
+        val root = findForegroundAppRoot() ?: return false
+        val scrollable = findScrollableNode(root)
+        val performed = scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
+        if (scrollable != null && scrollable !== root) scrollable.recycle()
+        root.recycle()
+        return performed
+    }
+
+    private fun findScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.isScrollable) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findScrollableNode(child)
+            if (found != null) {
+                if (found !== child) child.recycle()
+                return found
+            }
+            child.recycle()
+        }
+        return null
     }
 
     /**
@@ -73,7 +154,12 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     private fun stopReading() {
-        if (::screenReader.isInitialized) screenReader.stop()
+        CaptureBus.setAutoScrollReading(false)
+        mainHandler.removeCallbacksAndMessages(null)
+        if (::screenReader.isInitialized) {
+            screenReader.onReadingFinished = null
+            screenReader.stop()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
@@ -103,11 +189,13 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        stopReading()
         if (::overlayManager.isInitialized) overlayManager.hide()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        stopReading()
         if (::overlayManager.isInitialized) overlayManager.hide()
         if (::screenReader.isInitialized) screenReader.shutdown()
     }

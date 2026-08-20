@@ -40,6 +40,7 @@ class OverlayManager(
     private val onStopReading: () -> Unit,
     private val onAdjustRate: (delta: Float) -> Float,
     private val onAdjustPitch: (delta: Float) -> Float,
+    private val onToggleAutoScroll: () -> Unit,
 ) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -49,6 +50,7 @@ class OverlayManager(
     private var rootView: View? = null
     private var logContainer: LinearLayout? = null
     private var pauseButton: Button? = null
+    private var autoScrollButton: Button? = null
 
     /** True once the user taps the close button — [show] won't re-create the panel until the service reconnects. */
     private var dismissed = false
@@ -85,6 +87,11 @@ class OverlayManager(
                 pauseButton?.text = if (paused) "▶" else "⏸"
             }
         }
+        scope.launch {
+            CaptureBus.isAutoScrollReading.collect { reading ->
+                autoScrollButton?.text = if (reading) "🔁 rolando…" else "🔁 rolagem auto"
+            }
+        }
     }
 
     fun hide() {
@@ -92,6 +99,7 @@ class OverlayManager(
         rootView = null
         logContainer = null
         pauseButton = null
+        autoScrollButton = null
         scope.coroutineContext[Job]?.cancel()
     }
 
@@ -128,20 +136,33 @@ class OverlayManager(
         }
 
         val readerControls = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(2))
 
-            val readButton = Button(context).apply {
-                text = "🔊 ler tela"
-                setOnClickListener { onReadScreen() }
-            }
-            val stopButton = Button(context).apply {
-                text = "⏹"
-                setOnClickListener { onStopReading() }
+            val readRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+
+                val readButton = Button(context).apply {
+                    text = "🔊 ler tela"
+                    setOnClickListener { onReadScreen() }
+                }
+                val stopButton = Button(context).apply {
+                    text = "⏹"
+                    setOnClickListener { onStopReading() }
+                }
+
+                addView(readButton)
+                addView(stopButton)
             }
 
-            addView(readButton)
-            addView(stopButton)
+            val autoScroll = Button(context).apply {
+                text = "🔁 rolagem auto"
+                setOnClickListener { onToggleAutoScroll() }
+            }
+            autoScrollButton = autoScroll
+
+            addView(readRow)
+            addView(autoScroll)
         }
 
         val speechControls = LinearLayout(context).apply {
@@ -244,7 +265,8 @@ class OverlayManager(
                 setOnClickListener { valueLabel.text = formatSpeechValue(onAdjust(-SPEECH_STEP)) }
             }
             valueLabel = TextView(context).apply {
-                text = formatSpeechValue(1.0f)
+                // Delta of 0 just returns (and re-applies) the current persisted value — no actual change.
+                text = formatSpeechValue(onAdjust(0f))
                 setTextColor(Color.WHITE)
                 textSize = 11f
                 gravity = Gravity.CENTER
