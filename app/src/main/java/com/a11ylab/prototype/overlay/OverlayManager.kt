@@ -53,6 +53,9 @@ class OverlayManager(
     /** True once the user taps the close button — [show] won't re-create the panel until the service reconnects. */
     private var dismissed = false
 
+    /** Whether the log accordion is expanded — persists across close/reopen for this service connection. */
+    private var logExpanded = true
+
     fun show() {
         if (dismissed) return
         if (rootView != null) return
@@ -183,7 +186,29 @@ class OverlayManager(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             )
+            visibility = if (logExpanded) View.VISIBLE else View.GONE
             addView(log)
+        }
+
+        val logHeader = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dpToPx(12), dpToPx(4), dpToPx(12), dpToPx(4))
+            isClickable = true
+            isFocusable = true
+
+            val label = TextView(context).apply {
+                text = logHeaderText()
+                setTextColor(Color.parseColor("#CCCCCC"))
+                textSize = 11f
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            addView(label)
+
+            setOnClickListener {
+                logExpanded = !logExpanded
+                label.text = logHeaderText()
+                scrollView.visibility = if (logExpanded) View.VISIBLE else View.GONE
+            }
         }
 
         return LinearLayout(context).apply {
@@ -193,9 +218,12 @@ class OverlayManager(
             addView(readerControls)
             addView(speechControls)
             addView(controls)
+            addView(logHeader)
             addView(scrollView)
         }
     }
+
+    private fun logHeaderText(): String = if (logExpanded) "▾ Eventos" else "▸ Eventos"
 
     /** Builds a "− 1.00x +" row that nudges a speech parameter (rate or pitch) via [onAdjust]. */
     private fun buildStepperRow(label: String, onAdjust: (delta: Float) -> Float): LinearLayout {
