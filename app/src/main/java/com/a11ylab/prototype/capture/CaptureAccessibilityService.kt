@@ -129,7 +129,15 @@ class CaptureAccessibilityService : AccessibilityService() {
      * window instead and pick the foreground app one explicitly, skipping our own package.
      */
     private fun findForegroundAppRoot(): AccessibilityNodeInfo? {
-        for (window in windows) {
+        val allWindows = windows
+        Log.d(
+            TAG,
+            "findForegroundAppRoot: ${allWindows.size} window(s): " +
+                allWindows.joinToString {
+                    "type=${it.type} active=${it.isActive} focused=${it.isFocused} title=${it.title}"
+                },
+        )
+        for (window in allWindows) {
             if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
             val root = window.root
             if (root != null && root.packageName?.toString() != packageName) {
