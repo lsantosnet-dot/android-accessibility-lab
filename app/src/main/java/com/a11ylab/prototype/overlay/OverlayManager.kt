@@ -26,6 +26,8 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
 
+private const val SPEECH_STEP = 0.25f
+
 /**
  * Draws a small floating panel (TYPE_APPLICATION_OVERLAY) over whatever app is in the
  * foreground and streams [CaptureBus] events into it live. Plain Views on purpose —
@@ -36,6 +38,8 @@ class OverlayManager(
     private val context: Context,
     private val onReadScreen: () -> Unit,
     private val onStopReading: () -> Unit,
+    private val onAdjustRate: (delta: Float) -> Float,
+    private val onAdjustPitch: (delta: Float) -> Float,
 ) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -48,6 +52,9 @@ class OverlayManager(
 
     /** True once the user taps the close button — [show] won't re-create the panel until the service reconnects. */
     private var dismissed = false
+
+    /** Whether the log accordion is expanded — persists across close/reopen for this service connection. */
+    private var logExpanded = true
 
     fun show() {
         if (dismissed) return
@@ -137,6 +144,14 @@ class OverlayManager(
             addView(stopButton)
         }
 
+        val speechControls = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(2))
+
+            addView(buildStepperRow("Vel", onAdjustRate))
+            addView(buildStepperRow("Tom", onAdjustPitch))
+        }
+
         val controls = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(8))
@@ -171,7 +186,29 @@ class OverlayManager(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             )
+            visibility = if (logExpanded) View.VISIBLE else View.GONE
             addView(log)
+        }
+
+        val logHeader = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dpToPx(12), dpToPx(4), dpToPx(12), dpToPx(4))
+            isClickable = true
+            isFocusable = true
+
+            val label = TextView(context).apply {
+                text = logHeaderText()
+                setTextColor(Color.parseColor("#CCCCCC"))
+                textSize = 11f
+                setTypeface(typeface, Typeface.BOLD)
+            }
+            addView(label)
+
+            setOnClickListener {
+                logExpanded = !logExpanded
+                label.text = logHeaderText()
+                scrollView.visibility = if (logExpanded) View.VISIBLE else View.GONE
+            }
         }
 
         return LinearLayout(context).apply {
@@ -179,10 +216,53 @@ class OverlayManager(
             setBackgroundColor(Color.parseColor("#F0101418"))
             addView(titleBar)
             addView(readerControls)
+            addView(speechControls)
             addView(controls)
+            addView(logHeader)
             addView(scrollView)
         }
     }
+
+    private fun logHeaderText(): String = if (logExpanded) "▾ Eventos" else "▸ Eventos"
+
+    /** Builds a "− 1.00x +" row that nudges a speech parameter (rate or pitch) via [onAdjust]. */
+    private fun buildStepperRow(label: String, onAdjust: (delta: Float) -> Float): LinearLayout {
+        lateinit var valueLabel: TextView
+
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+
+            val name = TextView(context).apply {
+                text = label
+                setTextColor(Color.parseColor("#CCCCCC"))
+                textSize = 11f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val minus = Button(context).apply {
+                text = "−"
+                setOnClickListener { valueLabel.text = formatSpeechValue(onAdjust(-SPEECH_STEP)) }
+            }
+            valueLabel = TextView(context).apply {
+                text = formatSpeechValue(1.0f)
+                setTextColor(Color.WHITE)
+                textSize = 11f
+                gravity = Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(dpToPx(40), LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            val plus = Button(context).apply {
+                text = "+"
+                setOnClickListener { valueLabel.text = formatSpeechValue(onAdjust(SPEECH_STEP)) }
+            }
+
+            addView(name)
+            addView(minus)
+            addView(valueLabel)
+            addView(plus)
+        }
+    }
+
+    private fun formatSpeechValue(value: Float): String = String.format(Locale.US, "%.2fx", value)
 
     private fun renderEvents(events: List<CaptureEvent>) {
         val log = logContainer ?: return
