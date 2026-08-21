@@ -25,7 +25,7 @@ class CaptureAccessibilityService : AccessibilityService() {
     private lateinit var screenReader: ScreenReader
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var lastAutoScrollText: String? = null
+    private var lastAutoScrollSegments: List<String>? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -34,6 +34,8 @@ class CaptureAccessibilityService : AccessibilityService() {
             context = this,
             onReadScreen = ::readScreen,
             onStopReading = ::stopReading,
+            onSkipForward = { screenReader.skipForward() },
+            onSkipBack = { screenReader.skipBack() },
             onToggleAutoScroll = ::toggleAutoScroll,
         )
         overlayManager.show()
@@ -42,12 +44,12 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     /** Reads everything currently loaded in the foreground app's accessibility tree aloud. */
     private fun readScreen() {
-        val text = captureForegroundText()
-        if (text.isNullOrBlank()) {
+        val segments = captureForegroundSegments()
+        if (segments.isNullOrEmpty()) {
             Log.w(TAG, "readScreen: nothing to read")
             return
         }
-        screenReader.read(text)
+        screenReader.read(segments)
     }
 
     /** Starts/stops continuous reading: read the screen, scroll on, read again, until stopped or content stops changing. */
@@ -57,7 +59,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         Log.d(TAG, "autoScrollReading=$enabling")
         overlayManager.setKeepScreenOnDimmed(enabling)
         if (enabling) {
-            lastAutoScrollText = null
+            lastAutoScrollSegments = null
             screenReader.onReadingFinished = { mainHandler.post(::onAutoScrollChunkFinished) }
             readAndTrackAutoScroll()
         } else {
@@ -79,14 +81,14 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private fun readAndTrackAutoScroll() {
         if (!CaptureBus.isAutoScrollReading.value) return
-        val text = captureForegroundText()
-        if (text.isNullOrBlank() || text == lastAutoScrollText) {
+        val segments = captureForegroundSegments()
+        if (segments.isNullOrEmpty() || segments == lastAutoScrollSegments) {
             Log.d(TAG, "auto-scroll: no new content, stopping")
             stopAutoScroll()
             return
         }
-        lastAutoScrollText = text
-        screenReader.read(text)
+        lastAutoScrollSegments = segments
+        screenReader.read(segments)
     }
 
     private fun stopAutoScroll() {
@@ -95,13 +97,14 @@ class CaptureAccessibilityService : AccessibilityService() {
         overlayManager.setKeepScreenOnDimmed(false)
     }
 
-    private fun captureForegroundText(): String? {
+    /** Captures the foreground app's text, one entry per screen element — the units [ScreenReader] reads and skips between. */
+    private fun captureForegroundSegments(): List<String>? {
         val root = findForegroundAppRoot() ?: return null
-        val text = StringBuilder()
-        collectText(root, text)
+        val segments = mutableListOf<String>()
+        collectText(root, segments)
         root.recycle()
-        Log.d(TAG, "captureForegroundText: collected ${text.length} chars")
-        return text.toString()
+        Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s)")
+        return segments
     }
 
     /** Scrolls the foreground app's nearest scrollable container forward. Returns false at the end of content. */
@@ -153,12 +156,9 @@ class CaptureAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun collectText(node: AccessibilityNodeInfo, into: StringBuilder) {
+    private fun collectText(node: AccessibilityNodeInfo, into: MutableList<String>) {
         val text = extractText(node)
-        if (text.isNotBlank()) {
-            if (into.isNotEmpty()) into.append(". ")
-            into.append(text)
-        }
+        if (text.isNotBlank()) into.add(text)
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectText(child, into)

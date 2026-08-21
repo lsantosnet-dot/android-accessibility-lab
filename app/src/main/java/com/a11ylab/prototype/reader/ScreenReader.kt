@@ -37,17 +37,31 @@ object SpeechPrefs {
  * Speaks captured screen text aloud, auto-picking the TTS voice's language via on-device
  * ML Kit language identification. Lives for the lifetime of the owning service — TTS
  * playback isn't tied to any Activity, so it keeps going with the screen off.
+ *
+ * Text is read as a list of [segments] (one per captured screen element) rather than one
+ * big blob, so [skipForward]/[skipBack] have something meaningful to jump between — the
+ * old single-string approach only had TTS-input-length chunk boundaries, which cut text at
+ * arbitrary points unrelated to the screen's actual structure.
  */
 class ScreenReader(private val context: Context) {
 
     private val languageIdentifier = LanguageIdentification.getClient()
     private var ttsReady = false
-    private var pendingText: String? = null
     private var rate = SpeechPrefs.rate(context)
     private var pitch = SpeechPrefs.pitch(context)
-    private var lastUtteranceId: String? = null
 
-    /** Fires once per [read] call (success or failure) after every one of its chunks has finished. */
+    private var segments: List<String> = emptyList()
+    private var currentSegmentIndex = -1
+    private var hasPendingRead = false
+
+    /** True from [read] until playback naturally finishes or [stop] is called — guards stale TTS callbacks. */
+    private var isActive = false
+
+    /** Bumped on every [speakFrom] call so a callback from an already-superseded utterance is ignored. */
+    private var readGeneration = 0
+    private var lastUtteranceIdForGeneration: String? = null
+
+    /** Fires once per [read] call (success or failure) after every one of its segments has finished. */
     var onReadingFinished: (() -> Unit)? = null
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext, ::onTtsInitFinished)
@@ -58,9 +72,11 @@ class ScreenReader(private val context: Context) {
         if (ttsReady) {
             tts.setSpeechRate(rate)
             tts.setPitch(pitch)
-            pendingText?.let { speakWithDetectedLanguage(it) }
+            if (hasPendingRead) {
+                hasPendingRead = false
+                speakFrom(0)
+            }
         }
-        pendingText = null
     }
 
     init {
@@ -71,36 +87,69 @@ class ScreenReader(private val context: Context) {
 
             override fun onDone(utteranceId: String?) {
                 Log.d(TAG, "speak finished")
-                notifyIfLastChunk(utteranceId)
+                advanceIfLastChunkOfSegment(utteranceId)
             }
 
             @Suppress("DEPRECATION")
             override fun onError(utteranceId: String?) {
                 Log.e(TAG, "speak failed (utteranceId=$utteranceId)")
-                notifyIfLastChunk(utteranceId)
+                advanceIfLastChunkOfSegment(utteranceId)
             }
         })
     }
 
-    private fun notifyIfLastChunk(utteranceId: String?) {
-        if (utteranceId != null && utteranceId == lastUtteranceId) onReadingFinished?.invoke()
+    /** Auto-continues to the next segment once the current one finishes — unless a stop/skip already moved on. */
+    private fun advanceIfLastChunkOfSegment(utteranceId: String?) {
+        if (!isActive) return
+        if (utteranceId != null && utteranceId == lastUtteranceIdForGeneration) {
+            speakFrom(currentSegmentIndex + 1)
+        }
     }
 
-    fun read(text: String) {
-        Log.d(TAG, "read() called with ${text.length} chars, ttsReady=$ttsReady")
-        if (text.isBlank()) {
-            Log.w(TAG, "read() got no text to speak — nothing was captured from the screen")
+    fun read(segments: List<String>) {
+        Log.d(TAG, "read() called with ${segments.size} segment(s), ttsReady=$ttsReady")
+        if (segments.isEmpty()) {
+            Log.w(TAG, "read() got no segments to speak — nothing was captured from the screen")
             return
         }
+        this.segments = segments
+        isActive = true
         if (!ttsReady) {
-            Log.w(TAG, "TTS not ready yet, queuing text for when init finishes")
-            pendingText = text
+            Log.w(TAG, "TTS not ready yet, queuing read for when init finishes")
+            hasPendingRead = true
             return
         }
-        speakWithDetectedLanguage(text)
+        speakFrom(0)
+    }
+
+    /** Jumps to the next segment, if any. No-op if nothing is currently being read or it's already the last one. */
+    fun skipForward() {
+        if (!isActive || currentSegmentIndex + 1 !in segments.indices) return
+        tts.stop()
+        speakFrom(currentSegmentIndex + 1)
+    }
+
+    /** Jumps to the previous segment, if any. No-op if nothing is currently being read. */
+    fun skipBack() {
+        if (!isActive || segments.isEmpty()) return
+        tts.stop()
+        speakFrom((currentSegmentIndex - 1).coerceAtLeast(0))
+    }
+
+    private fun speakFrom(index: Int) {
+        if (!isActive) return
+        if (index !in segments.indices) {
+            isActive = false
+            onReadingFinished?.invoke()
+            return
+        }
+        currentSegmentIndex = index
+        readGeneration++
+        speakWithDetectedLanguage(segments[index], readGeneration)
     }
 
     fun stop() {
+        isActive = false
         tts.stop()
     }
 
@@ -126,19 +175,30 @@ class ScreenReader(private val context: Context) {
         languageIdentifier.close()
     }
 
-    private fun speakWithDetectedLanguage(text: String) {
+    /**
+     * [generation] is the value of [readGeneration] at the moment this read was kicked off —
+     * captured up front so a detection result that resolves after a subsequent skip/stop can
+     * be recognized as stale and dropped in [speak], instead of flushing the TTS queue with
+     * audio for a segment that's no longer the one being read.
+     */
+    private fun speakWithDetectedLanguage(text: String, generation: Int) {
         languageIdentifier.identifyLanguage(text)
             .addOnSuccessListener { languageCode ->
                 Log.d(TAG, "language detected: $languageCode")
-                speak(text, languageCode)
+                speak(text, languageCode, generation)
             }
             .addOnFailureListener { error ->
                 Log.e(TAG, "language detection failed, falling back to device locale", error)
-                speak(text, languageCode = null)
+                speak(text, languageCode = null, generation)
             }
     }
 
-    private fun speak(text: String, languageCode: String?) {
+    private fun speak(text: String, languageCode: String?, generation: Int) {
+        if (generation != readGeneration) {
+            Log.d(TAG, "speak(): stale generation $generation (current is $readGeneration), dropping")
+            return
+        }
+
         val locale = languageCode
             ?.takeIf { it != "und" }
             ?.let { Locale.forLanguageTag(it) }
@@ -152,15 +212,15 @@ class ScreenReader(private val context: Context) {
         }
 
         // TextToSpeech.speak() rejects the whole call (result=ERROR, nothing spoken) once text
-        // exceeds its max input length — long article pages routinely blow past that in one string.
+        // exceeds its max input length — a single screen element's text can still blow past that.
         val maxChunkLength = TextToSpeech.getMaxSpeechInputLength() - 100
         val chunks = chunkText(text, maxChunkLength)
         Log.d(TAG, "speak(): ${text.length} chars split into ${chunks.size} chunk(s), max=$maxChunkLength")
 
-        lastUtteranceId = "$UTTERANCE_ID-${chunks.lastIndex}"
+        lastUtteranceIdForGeneration = "$UTTERANCE_ID-$generation-${chunks.lastIndex}"
         chunks.forEachIndexed { index, chunk ->
             val queueMode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-            val speakResult = tts.speak(chunk, queueMode, null, "$UTTERANCE_ID-$index")
+            val speakResult = tts.speak(chunk, queueMode, null, "$UTTERANCE_ID-$generation-$index")
             Log.d(TAG, "speak() chunk $index (${chunk.length} chars) result=$speakResult")
         }
     }
