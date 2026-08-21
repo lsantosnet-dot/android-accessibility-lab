@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
@@ -18,15 +19,21 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.a11ylab.prototype.capture.CaptureAccessibilityService
+import com.a11ylab.prototype.reader.SPEECH_STEP
+import com.a11ylab.prototype.reader.SpeechPrefs
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
@@ -49,6 +56,7 @@ class MainActivity : ComponentActivity() {
                                 ),
                             )
                         },
+                        onOpenFloatingWindow = { CaptureAccessibilityService.openOverlay() },
                     )
                 }
             }
@@ -79,9 +87,13 @@ private fun StatusScreen(
     isOverlayGranted: () -> Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
+    onOpenFloatingWindow: () -> Unit,
 ) {
+    val context = LocalContext.current
     var accessibilityOn by remember { mutableStateOf(isAccessibilityEnabled()) }
     var overlayOn by remember { mutableStateOf(isOverlayGranted()) }
+    var rate by remember { mutableFloatStateOf(SpeechPrefs.rate(context)) }
+    var pitch by remember { mutableFloatStateOf(SpeechPrefs.pitch(context)) }
 
     // Re-check whenever the user comes back from Settings.
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -95,6 +107,8 @@ private fun StatusScreen(
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
+
+    val readyForOverlay = accessibilityOn && overlayOn
 
     Column(
         modifier = Modifier
@@ -115,10 +129,40 @@ private fun StatusScreen(
             Text("Conceder permissão de overlay")
         }
 
-        Text(
-            "Depois de ativar o serviço e conceder a permissão de overlay, abra " +
-                "qualquer outro app: um painel flutuante vai mostrar os eventos de " +
-                "acessibilidade capturados em tempo real.",
+        Button(enabled = readyForOverlay, onClick = onOpenFloatingWindow) {
+            Text("Abrir janela flutuante")
+        }
+
+        Text("Velocidade e tom de voz", style = MaterialTheme.typography.titleMedium)
+
+        SpeechStepperRow(
+            label = "Velocidade",
+            value = rate,
+            onAdjust = { delta -> rate = CaptureAccessibilityService.adjustRate(context, delta) },
         )
+        SpeechStepperRow(
+            label = "Tom",
+            value = pitch,
+            onAdjust = { delta -> pitch = CaptureAccessibilityService.adjustPitch(context, delta) },
+        )
+
+        Text(
+            "Depois de ativar o serviço e conceder a permissão de overlay, use o botão " +
+                "acima para abrir o painel flutuante — ou simplesmente abra qualquer outro " +
+                "app, e ele vai aparecer automaticamente.",
+        )
+    }
+}
+
+@Composable
+private fun SpeechStepperRow(label: String, value: Float, onAdjust: (delta: Float) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.padding(end = 8.dp))
+        Button(onClick = { onAdjust(-SPEECH_STEP) }) { Text("−") }
+        Text(
+            String.format(Locale.US, "%.2fx", value),
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        Button(onClick = { onAdjust(SPEECH_STEP) }) { Text("+") }
     }
 }

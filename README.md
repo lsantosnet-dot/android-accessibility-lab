@@ -1,11 +1,10 @@
 # Accessibility Lab
 
 Protótipo de estudo sobre a `AccessibilityService` do Android. Ao ativar o
-serviço e conceder a permissão de overlay, um painel flutuante mostra em
-tempo real os eventos de acessibilidade (troca de janela, mudança de
-conteúdo, cliques, foco...) capturados de **qualquer app** aberto no
-aparelho — o objetivo é aprender como leitores de tela e ferramentas de
-automação enxergam a tela por baixo dos panos.
+serviço e conceder a permissão de overlay, um painel flutuante compacto
+permite ler em voz alta o conteúdo de **qualquer app** aberto no aparelho —
+o objetivo é aprender como leitores de tela enxergam a tela por baixo dos
+panos.
 
 ## Como rodar
 
@@ -20,31 +19,38 @@ automação enxergam a tela por baixo dos panos.
    permite que um app se autoconceda essa permissão.
 4. Toque em **"Conceder permissão de overlay"** e autorize o app a desenhar
    sobre outros apps.
-5. Volte para a tela inicial de qualquer app: o painel flutuante deve
-   aparecer no canto superior esquerdo, com o log de eventos ao vivo.
+5. Com as duas permissões ativas, toque em **"Abrir janela flutuante"** na
+   própria tela do app (ou apenas volte para a tela inicial de qualquer
+   app: o painel também aparece automaticamente).
+
+A tela do app também reúne os controles de **velocidade e tom de voz** da
+leitura — eles ficam na configuração, não no painel flutuante, para manter o
+painel pequeno.
 
 ## Arquitetura
 
 ```
-MainActivity                    → onboarding + status (Compose)
+MainActivity                    → onboarding + status + configurações (Compose)
 capture/CaptureAccessibilityService → escuta os eventos, lê a árvore de nós
-capture/CaptureEvent            → modelo de dado de um evento capturado
-capture/CaptureBus              → StateFlow em memória, ponte serviço → overlay
-overlay/OverlayManager          → painel flutuante (WindowManager + Views)
+capture/CaptureBus              → StateFlow em memória, estado de rolagem automática
+overlay/OverlayManager          → painel flutuante compacto (WindowManager + Views)
+reader/ScreenReader             → TTS + detecção de idioma
+reader/SpeechPrefs              → velocidade/tom persistidos, lidos pelo serviço e pela tela de configurações
 res/xml/accessibility_service_config.xml → declara os tipos de evento ouvidos
 ```
 
-Fluxo: `CaptureAccessibilityService.onAccessibilityEvent()` extrai dados do
-nó de origem e publica em `CaptureBus`. `OverlayManager` observa esse
-`StateFlow` e redesenha a lista de eventos no painel flutuante.
+`CaptureAccessibilityService` expõe uma instância estática (`instance`) para
+que `MainActivity` possa abrir o painel flutuante (`openOverlay()`) e
+ajustar velocidade/tom (`adjustRate()`/`adjustPitch()`) mesmo sem esperar um
+evento de acessibilidade — antes disso, era preciso desativar e reativar o
+serviço para o painel reaparecer depois de conceder a permissão de overlay.
 
 ## Privacidade
 
-- Nada é persistido em disco — os eventos vivem só em memória (até 50 no
-  buffer) e somem quando o serviço para.
+- Nada é persistido em disco além da velocidade/tom de voz escolhidos.
 - Campos marcados como senha (`node.isPassword`) têm o texto substituído por
-  `••••••` antes de chegar ao overlay ou a qualquer log — o mesmo padrão que
-  leitores de tela reais usam.
+  `••••••` antes de ser lido em voz alta — o mesmo padrão que leitores de
+  tela reais usam.
 - Como o serviço não tem `packageNames` restrito no config XML, ele recebe
   eventos de **qualquer app em primeiro plano**, incluindo apps de
   terceiros. Use apenas no seu próprio aparelho, para fins de estudo.

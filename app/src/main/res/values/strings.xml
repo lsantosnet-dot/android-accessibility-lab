@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Accessibility Lab</string>
     <string name="service_label">Accessibility Lab — Capture Service</string>
-    <string name="service_description">Serviço de estudo: lê a árvore de acessibilidade da janela em primeiro plano e exibe os eventos capturados em um painel flutuante, apenas para fins de aprendizado local.</string>
+    <string name="service_description">Serviço de estudo: lê a árvore de acessibilidade da janela em primeiro plano e oferece leitura em voz alta por um painel flutuante, apenas para fins de aprendizado local.</string>
 </resources>

@@ -9,25 +9,42 @@ import java.util.Locale
 
 private const val TAG = "ScreenReader"
 private const val UTTERANCE_ID = "a11ylab-read-screen"
-private const val MIN_SPEECH_PARAM = 0.5f
-private const val MAX_SPEECH_PARAM = 2.0f
+const val MIN_SPEECH_PARAM = 0.5f
+const val MAX_SPEECH_PARAM = 2.0f
+const val SPEECH_STEP = 0.25f
 private const val PREFS_NAME = "screen_reader_prefs"
 private const val KEY_RATE = "rate"
 private const val KEY_PITCH = "pitch"
+
+/**
+ * Persisted speech rate/pitch. Shared between the live [ScreenReader] (when the
+ * accessibility service is running) and the settings screen, which can adjust these
+ * even while the service isn't connected — [ScreenReader] picks up the stored value
+ * the next time it starts.
+ */
+object SpeechPrefs {
+    private fun prefs(context: Context) =
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    fun rate(context: Context): Float = prefs(context).getFloat(KEY_RATE, 1.0f)
+    fun pitch(context: Context): Float = prefs(context).getFloat(KEY_PITCH, 1.0f)
+
+    fun saveRate(context: Context, value: Float) = prefs(context).edit().putFloat(KEY_RATE, value).apply()
+    fun savePitch(context: Context, value: Float) = prefs(context).edit().putFloat(KEY_PITCH, value).apply()
+}
 
 /**
  * Speaks captured screen text aloud, auto-picking the TTS voice's language via on-device
  * ML Kit language identification. Lives for the lifetime of the owning service — TTS
  * playback isn't tied to any Activity, so it keeps going with the screen off.
  */
-class ScreenReader(context: Context) {
+class ScreenReader(private val context: Context) {
 
     private val languageIdentifier = LanguageIdentification.getClient()
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     private var ttsReady = false
     private var pendingText: String? = null
-    private var rate = prefs.getFloat(KEY_RATE, 1.0f)
-    private var pitch = prefs.getFloat(KEY_PITCH, 1.0f)
+    private var rate = SpeechPrefs.rate(context)
+    private var pitch = SpeechPrefs.pitch(context)
     private var lastUtteranceId: String? = null
 
     /** Fires once per [read] call (success or failure) after every one of its chunks has finished. */
@@ -91,7 +108,7 @@ class ScreenReader(context: Context) {
     fun adjustRate(delta: Float): Float {
         rate = (rate + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
         tts.setSpeechRate(rate)
-        prefs.edit().putFloat(KEY_RATE, rate).apply()
+        SpeechPrefs.saveRate(context, rate)
         return rate
     }
 
@@ -99,7 +116,7 @@ class ScreenReader(context: Context) {
     fun adjustPitch(delta: Float): Float {
         pitch = (pitch + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
         tts.setPitch(pitch)
-        prefs.edit().putFloat(KEY_PITCH, pitch).apply()
+        SpeechPrefs.savePitch(context, pitch)
         return pitch
     }
 

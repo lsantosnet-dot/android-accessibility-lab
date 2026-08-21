@@ -1,6 +1,7 @@
 package com.a11ylab.prototype.capture
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -8,7 +9,10 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.a11ylab.prototype.overlay.OverlayManager
+import com.a11ylab.prototype.reader.MAX_SPEECH_PARAM
+import com.a11ylab.prototype.reader.MIN_SPEECH_PARAM
 import com.a11ylab.prototype.reader.ScreenReader
+import com.a11ylab.prototype.reader.SpeechPrefs
 
 private const val TAG = "CaptureService"
 
@@ -30,11 +34,10 @@ class CaptureAccessibilityService : AccessibilityService() {
             context = this,
             onReadScreen = ::readScreen,
             onStopReading = ::stopReading,
-            onAdjustRate = { delta -> screenReader.adjustRate(delta) },
-            onAdjustPitch = { delta -> screenReader.adjustPitch(delta) },
             onToggleAutoScroll = ::toggleAutoScroll,
         )
         overlayManager.show()
+        instance = this
     }
 
     /** Reads everything currently loaded in the foreground app's accessibility tree aloud. */
@@ -177,15 +180,6 @@ class CaptureAccessibilityService : AccessibilityService() {
         // Overlay permission may have been granted after the service connected — retry
         // here so the panel appears without requiring the user to toggle the service.
         overlayManager.show()
-        CaptureBus.push(
-            CaptureEvent(
-                timestampMillis = System.currentTimeMillis(),
-                packageName = event.packageName?.toString() ?: "?",
-                className = event.className?.toString() ?: "?",
-                eventType = AccessibilityEvent.eventTypeToString(event.eventType),
-                text = extractText(event.source),
-            ),
-        )
     }
 
     /** Redacts password fields — the same convention screen readers use. */
@@ -209,5 +203,43 @@ class CaptureAccessibilityService : AccessibilityService() {
         stopReading()
         if (::overlayManager.isInitialized) overlayManager.hide()
         if (::screenReader.isInitialized) screenReader.shutdown()
+        if (instance === this) instance = null
+    }
+
+    companion object {
+        /** The currently connected service instance, if any — accessibility services are singletons in practice. */
+        var instance: CaptureAccessibilityService? = null
+            private set
+
+        /** Opens the floating panel from outside the service, e.g. the settings screen's "abrir janela flutuante" action. */
+        fun openOverlay(): Boolean {
+            val service = instance ?: return false
+            service.overlayManager.open()
+            return true
+        }
+
+        /** Adjusts speech rate by [delta], live if the service is running, or persisted for its next start otherwise. */
+        fun adjustRate(context: Context, delta: Float): Float {
+            val service = instance
+            return if (service != null) {
+                service.screenReader.adjustRate(delta)
+            } else {
+                val newValue = (SpeechPrefs.rate(context) + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
+                SpeechPrefs.saveRate(context, newValue)
+                newValue
+            }
+        }
+
+        /** Adjusts speech pitch by [delta], live if the service is running, or persisted for its next start otherwise. */
+        fun adjustPitch(context: Context, delta: Float): Float {
+            val service = instance
+            return if (service != null) {
+                service.screenReader.adjustPitch(delta)
+            } else {
+                val newValue = (SpeechPrefs.pitch(context) + delta).coerceIn(MIN_SPEECH_PARAM, MAX_SPEECH_PARAM)
+                SpeechPrefs.savePitch(context, newValue)
+                newValue
+            }
+        }
     }
 }
