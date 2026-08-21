@@ -31,6 +31,8 @@ class OverlayManager(
     private val context: Context,
     private val onReadScreen: () -> Unit,
     private val onStopReading: () -> Unit,
+    private val onSkipForward: () -> Unit,
+    private val onSkipBack: () -> Unit,
     private val onToggleAutoScroll: () -> Unit,
 ) {
 
@@ -164,6 +166,22 @@ class OverlayManager(
                 addView(stopButton)
             }
 
+            val skipRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+
+                val skipBackButton = Button(context).apply {
+                    text = "⏮"
+                    setOnClickListener { onSkipBack() }
+                }
+                val skipForwardButton = Button(context).apply {
+                    text = "⏭"
+                    setOnClickListener { onSkipForward() }
+                }
+
+                addView(skipBackButton)
+                addView(skipForwardButton)
+            }
+
             val autoScroll = Button(context).apply {
                 text = "🔁 rolagem auto"
                 setOnClickListener { onToggleAutoScroll() }
@@ -171,6 +189,7 @@ class OverlayManager(
             autoScrollButton = autoScroll
 
             addView(readRow)
+            addView(skipRow)
             addView(autoScroll)
         }
 
