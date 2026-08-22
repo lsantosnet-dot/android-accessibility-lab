@@ -36,8 +36,16 @@ capture/CaptureBus              → StateFlow em memória, estado de rolagem aut
 overlay/OverlayManager          → painel flutuante compacto (WindowManager + Views)
 reader/ScreenReader             → TTS + detecção de idioma
 reader/SpeechPrefs              → velocidade/tom persistidos, lidos pelo serviço e pela tela de configurações
+reader/MediaSessionController   → MediaSessionCompat + notificação MediaStyle: card de play/pause e avançar/voltar na tela de bloqueio
+reader/MediaControlReceiver     → recebe os toques nesse card e repassa para o serviço
 res/xml/accessibility_service_config.xml → declara os tipos de evento ouvidos
 ```
+
+O card na tela de bloqueio é a mesma superfície nativa que apps de música usam (uma
+`MediaSessionCompat` associada a uma notificação `MediaStyle`) — não um overlay: janelas
+`TYPE_APPLICATION_OVERLAY` nunca são desenhadas sobre a tela de bloqueio segura. Ele só aparece
+enquanto a leitura em voz alta está ativa (tocando ou pausada), e exige a permissão de
+notificação (Android 13+), pedida na própria tela do app.
 
 `CaptureAccessibilityService` expõe uma instância estática (`instance`) para
 que `MainActivity` possa abrir o painel flutuante (`openOverlay()`) e

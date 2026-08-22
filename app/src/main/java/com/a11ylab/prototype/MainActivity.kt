@@ -1,12 +1,17 @@
 package com.a11ylab.prototype
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.a11ylab.prototype.capture.CaptureAccessibilityService
@@ -45,6 +51,7 @@ class MainActivity : ComponentActivity() {
                     StatusScreen(
                         isAccessibilityEnabled = ::isAccessibilityServiceEnabled,
                         isOverlayGranted = { Settings.canDrawOverlays(this) },
+                        isNotificationGranted = ::isNotificationPermissionGranted,
                         onOpenAccessibilitySettings = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                         },
@@ -61,6 +68,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** Notification permission is required (Android 13+) for the lock-screen media card to actually show. */
+    private fun isNotificationPermissionGranted(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
@@ -85,6 +101,7 @@ class MainActivity : ComponentActivity() {
 private fun StatusScreen(
     isAccessibilityEnabled: () -> Boolean,
     isOverlayGranted: () -> Boolean,
+    isNotificationGranted: () -> Boolean,
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenFloatingWindow: () -> Unit,
@@ -92,8 +109,13 @@ private fun StatusScreen(
     val context = LocalContext.current
     var accessibilityOn by remember { mutableStateOf(isAccessibilityEnabled()) }
     var overlayOn by remember { mutableStateOf(isOverlayGranted()) }
+    var notificationsOn by remember { mutableStateOf(isNotificationGranted()) }
     var rate by remember { mutableFloatStateOf(SpeechPrefs.rate(context)) }
     var pitch by remember { mutableFloatStateOf(SpeechPrefs.pitch(context)) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> notificationsOn = granted }
 
     // Re-check whenever the user comes back from Settings.
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -102,6 +124,7 @@ private fun StatusScreen(
             if (event == Lifecycle.Event.ON_RESUME) {
                 accessibilityOn = isAccessibilityEnabled()
                 overlayOn = isOverlayGranted()
+                notificationsOn = isNotificationGranted()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -133,6 +156,22 @@ private fun StatusScreen(
             Text("Abrir janela flutuante")
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Text(
+                if (notificationsOn) {
+                    "Permissão de notificação: CONCEDIDA"
+                } else {
+                    "Permissão de notificação: PENDENTE — sem ela o card não aparece na tela de bloqueio"
+                },
+            )
+            Button(
+                enabled = !notificationsOn,
+                onClick = { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) },
+            ) {
+                Text("Conceder permissão de notificação")
+            }
+        }
+
         Text("Velocidade e tom de voz", style = MaterialTheme.typography.titleMedium)
 
         SpeechStepperRow(
@@ -149,7 +188,8 @@ private fun StatusScreen(
         Text(
             "Depois de ativar o serviço e conceder a permissão de overlay, use o botão " +
                 "acima para abrir o painel flutuante — ou simplesmente abra qualquer outro " +
-                "app, e ele vai aparecer automaticamente.",
+                "app, e ele vai aparecer automaticamente. Enquanto a leitura estiver ativa, " +
+                "um card com play/pause e avançar/voltar também aparece na tela de bloqueio.",
         )
     }
 }

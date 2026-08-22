@@ -10,7 +10,13 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import com.a11ylab.prototype.overlay.OverlayManager
 import com.a11ylab.prototype.reader.MAX_SPEECH_PARAM
+import com.a11ylab.prototype.reader.MEDIA_ACTION_PLAY_PAUSE
+import com.a11ylab.prototype.reader.MEDIA_ACTION_SKIP_NEXT
+import com.a11ylab.prototype.reader.MEDIA_ACTION_SKIP_PREVIOUS
+import com.a11ylab.prototype.reader.MEDIA_ACTION_STOP
 import com.a11ylab.prototype.reader.MIN_SPEECH_PARAM
+import com.a11ylab.prototype.reader.MediaSessionController
+import com.a11ylab.prototype.reader.ReaderState
 import com.a11ylab.prototype.reader.ScreenReader
 import com.a11ylab.prototype.reader.SpeechPrefs
 
@@ -23,13 +29,22 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private lateinit var overlayManager: OverlayManager
     private lateinit var screenReader: ScreenReader
+    private lateinit var mediaSessionController: MediaSessionController
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var lastAutoScrollSegments: List<String>? = null
 
+    /** Mirrors [ScreenReader.onStateChanged] so [handleMediaControl]'s play/pause toggle knows what to do. */
+    private var readerState = ReaderState.IDLE
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         screenReader = ScreenReader(this)
+        mediaSessionController = MediaSessionController(this)
+        screenReader.onStateChanged = { state, current, total ->
+            readerState = state
+            mediaSessionController.updateState(state, current, total)
+        }
         overlayManager = OverlayManager(
             context = this,
             onReadScreen = ::readScreen,
@@ -40,6 +55,15 @@ class CaptureAccessibilityService : AccessibilityService() {
         )
         overlayManager.show()
         instance = this
+    }
+
+    /** play/pause on the lock-screen card is a single button — decide which action it means from the current state. */
+    private fun togglePlayPauseFromMediaControl() {
+        when (readerState) {
+            ReaderState.READING -> screenReader.pause()
+            ReaderState.PAUSED -> screenReader.resume()
+            ReaderState.IDLE -> readScreen()
+        }
     }
 
     /** Reads everything currently loaded in the foreground app's accessibility tree aloud. */
@@ -203,6 +227,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         stopReading()
         if (::overlayManager.isInitialized) overlayManager.hide()
         if (::screenReader.isInitialized) screenReader.shutdown()
+        if (::mediaSessionController.isInitialized) mediaSessionController.release()
         if (instance === this) instance = null
     }
 
@@ -216,6 +241,17 @@ class CaptureAccessibilityService : AccessibilityService() {
             val service = instance ?: return false
             service.overlayManager.open()
             return true
+        }
+
+        /** Routes a tap on the lock-screen/notification media controls to the right reader action. */
+        fun handleMediaControl(action: String) {
+            val service = instance ?: return
+            when (action) {
+                MEDIA_ACTION_PLAY_PAUSE -> service.togglePlayPauseFromMediaControl()
+                MEDIA_ACTION_SKIP_NEXT -> service.screenReader.skipForward()
+                MEDIA_ACTION_SKIP_PREVIOUS -> service.screenReader.skipBack()
+                MEDIA_ACTION_STOP -> service.stopReading()
+            }
         }
 
         /** Adjusts speech rate by [delta], live if the service is running, or persisted for its next start otherwise. */

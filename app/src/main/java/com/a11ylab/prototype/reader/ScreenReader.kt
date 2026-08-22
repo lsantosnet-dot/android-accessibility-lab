@@ -16,6 +16,9 @@ private const val PREFS_NAME = "screen_reader_prefs"
 private const val KEY_RATE = "rate"
 private const val KEY_PITCH = "pitch"
 
+/** Playback state surfaced to [ScreenReader.onStateChanged] — mirrored onto the lock-screen media card. */
+enum class ReaderState { IDLE, READING, PAUSED }
+
 /**
  * Persisted speech rate/pitch. Shared between the live [ScreenReader] (when the
  * accessibility service is running) and the settings screen, which can adjust these
@@ -57,12 +60,18 @@ class ScreenReader(private val context: Context) {
     /** True from [read] until playback naturally finishes or [stop] is called — guards stale TTS callbacks. */
     private var isActive = false
 
+    /** True between [pause] and [resume] — distinct from [isActive], which stays true while paused. */
+    private var isPaused = false
+
     /** Bumped on every [speakFrom] call so a callback from an already-superseded utterance is ignored. */
     private var readGeneration = 0
     private var lastUtteranceIdForGeneration: String? = null
 
     /** Fires once per [read] call (success or failure) after every one of its segments has finished. */
     var onReadingFinished: (() -> Unit)? = null
+
+    /** Fires on every playback transition (segment start, pause, resume, finish) with the segment position. */
+    var onStateChanged: ((state: ReaderState, currentSegment: Int, totalSegments: Int) -> Unit)? = null
 
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext, ::onTtsInitFinished)
 
@@ -114,6 +123,7 @@ class ScreenReader(private val context: Context) {
         }
         this.segments = segments
         isActive = true
+        isPaused = false
         if (!ttsReady) {
             Log.w(TAG, "TTS not ready yet, queuing read for when init finishes")
             hasPendingRead = true
@@ -140,17 +150,37 @@ class ScreenReader(private val context: Context) {
         if (!isActive) return
         if (index !in segments.indices) {
             isActive = false
+            isPaused = false
+            onStateChanged?.invoke(ReaderState.IDLE, 0, 0)
             onReadingFinished?.invoke()
             return
         }
         currentSegmentIndex = index
         readGeneration++
+        onStateChanged?.invoke(ReaderState.READING, index + 1, segments.size)
         speakWithDetectedLanguage(segments[index], readGeneration)
+    }
+
+    /** Stops speaking but keeps the current position, so [resume] can continue from where it left off. */
+    fun pause() {
+        if (!isActive || isPaused) return
+        isPaused = true
+        tts.stop()
+        onStateChanged?.invoke(ReaderState.PAUSED, currentSegmentIndex + 1, segments.size)
+    }
+
+    /** Re-speaks the segment that was current when [pause] was called. No-op unless currently paused. */
+    fun resume() {
+        if (!isActive || !isPaused) return
+        isPaused = false
+        speakFrom(currentSegmentIndex)
     }
 
     fun stop() {
         isActive = false
+        isPaused = false
         tts.stop()
+        onStateChanged?.invoke(ReaderState.IDLE, 0, 0)
     }
 
     /** Adjusts speech rate by [delta] (clamped to a sane range), persists it, and returns the new value. */
