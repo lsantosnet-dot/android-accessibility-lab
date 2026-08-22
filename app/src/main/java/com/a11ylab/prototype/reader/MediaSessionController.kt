@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 import com.a11ylab.prototype.R
+import com.a11ylab.prototype.capture.CaptureAccessibilityService
 
 private const val CHANNEL_ID = "screen_reading_playback"
 private const val NOTIFICATION_ID = 1001
@@ -35,6 +36,17 @@ class MediaSessionController(private val service: Service) {
 
     init {
         ensureChannel()
+        // The lock screen's dedicated media widget (SystemUI's "media carousel", since Android 11)
+        // drives its buttons through MediaController.getTransportControls() — i.e. this callback —
+        // not through the notification actions' PendingIntents below. Both are wired to the same
+        // handleMediaControl() so ordinary notification taps keep working too.
+        mediaSession.setCallback(object : MediaSessionCompat.Callback() {
+            override fun onPlay() = CaptureAccessibilityService.handleMediaControl(MEDIA_ACTION_PLAY_PAUSE)
+            override fun onPause() = CaptureAccessibilityService.handleMediaControl(MEDIA_ACTION_PLAY_PAUSE)
+            override fun onSkipToNext() = CaptureAccessibilityService.handleMediaControl(MEDIA_ACTION_SKIP_NEXT)
+            override fun onSkipToPrevious() = CaptureAccessibilityService.handleMediaControl(MEDIA_ACTION_SKIP_PREVIOUS)
+            override fun onStop() = CaptureAccessibilityService.handleMediaControl(MEDIA_ACTION_STOP)
+        })
     }
 
     /** Pushes a new reading state: updates the session, and shows/updates the notification. */
