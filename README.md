@@ -53,6 +53,29 @@ ajustar velocidade/tom (`adjustRate()`/`adjustPitch()`) mesmo sem esperar um
 evento de acessibilidade — antes disso, era preciso desativar e reativar o
 serviço para o painel reaparecer depois de conceder a permissão de overlay.
 
+## Como o app decide "qual tela ler"
+
+Apps costumam manter a tela anterior viva atrás da que está em exibição — o
+Gmail faz isso: ao abrir uma mensagem, a lista de e-mails continua na árvore
+de acessibilidade. Sem cuidado, o leitor acaba lendo a lista, não a mensagem.
+`CaptureAccessibilityService` resolve isso em duas etapas:
+
+1. **Escolha da janela** (`findForegroundAppRoot`): entre as janelas de
+   aplicativo, ganha a que tem o foco de entrada (o painel flutuante é
+   `FLAG_NOT_FOCUSABLE`, então tocar em "ler tela" não rouba esse foco do
+   app); em seguida, a que tem maior área realmente visível, calculada
+   subtraindo as janelas de camada mais alta; e por fim a ordem Z (`layer`).
+2. **Escolha dos nós** (`collectVisibleText`): nós com
+   `isVisibleToUser == false` são descartados junto com sua subárvore, e
+   irmãos são avaliados de trás para frente (uma `View` desenha por cima das
+   anteriores) — um irmão totalmente coberto por irmãos posteriores que
+   produziram texto é ignorado. A ordem de leitura em voz alta continua
+   normal: só a *decisão* é feita de trás para frente.
+
+Se nada sobrar desse filtro — alguns apps reportam `isVisibleToUser` errado
+nos contêineres —, o serviço cai de volta na leitura da árvore inteira, para
+não ficar mudo.
+
 ## Privacidade
 
 - Nada é persistido em disco além da velocidade/tom de voz escolhidos.
