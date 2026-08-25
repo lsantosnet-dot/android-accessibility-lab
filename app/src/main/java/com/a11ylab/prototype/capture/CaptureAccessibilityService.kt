@@ -159,6 +159,12 @@ class CaptureAccessibilityService : AccessibilityService() {
      * rootInActiveWindow can resolve to our own overlay right after the user taps its "ler
      * tela" button — that tap is what most recently made a window "active". Look at every
      * window instead and pick the foreground app one explicitly, skipping our own package.
+     *
+     * [windows] isn't guaranteed to be ordered top-to-bottom: some apps (e.g. Gmail, briefly,
+     * right after opening an email) keep a previous screen's window alive underneath the new
+     * one, and both show up here with the same package name. Iterating in list order can then
+     * return the wrong one. [AccessibilityWindowInfo.getLayer] is the documented Z-order signal
+     * (higher layer = more on top), so pick candidates by that instead of by list position.
      */
     private fun findForegroundAppRoot(): AccessibilityNodeInfo? {
         val allWindows = windows
@@ -166,11 +172,13 @@ class CaptureAccessibilityService : AccessibilityService() {
             TAG,
             "findForegroundAppRoot: ${allWindows.size} window(s): " +
                 allWindows.joinToString {
-                    "type=${it.type} active=${it.isActive} focused=${it.isFocused} title=${it.title}"
+                    "type=${it.type} layer=${it.layer} active=${it.isActive} focused=${it.isFocused} title=${it.title}"
                 },
         )
-        for (window in allWindows) {
-            if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+        val topmostFirst = allWindows
+            .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            .sortedByDescending { it.layer }
+        for (window in topmostFirst) {
             val root = window.root
             if (root != null && root.packageName?.toString() != packageName) {
                 return root
