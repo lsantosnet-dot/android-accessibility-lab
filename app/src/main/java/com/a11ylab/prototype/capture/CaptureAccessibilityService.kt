@@ -2,6 +2,9 @@ package com.a11ylab.prototype.capture
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.graphics.Rect
+import android.graphics.Region
+import android.graphics.RegionIterator
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -125,7 +128,14 @@ class CaptureAccessibilityService : AccessibilityService() {
     private fun captureForegroundSegments(): List<String>? {
         val root = findForegroundAppRoot() ?: return null
         val segments = mutableListOf<String>()
-        collectText(root, segments)
+        collectVisibleText(root, segments)
+        if (segments.isEmpty()) {
+            // Nothing survived the visibility/occlusion filter. Some apps mis-report
+            // isVisibleToUser on their container nodes, and reading a possibly-stale screen
+            // still beats reading nothing at all — so fall back to the unfiltered tree.
+            Log.w(TAG, "captureForegroundSegments: visible pass came back empty, falling back to full tree")
+            collectAllText(root, segments)
+        }
         root.recycle()
         Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s)")
         return segments
@@ -141,7 +151,10 @@ class CaptureAccessibilityService : AccessibilityService() {
         return performed
     }
 
+    /** Skips invisible subtrees for the same reason [collectVisibleText] does: a screen kept alive behind
+     *  the one on display still exposes its scrollable list, and scrolling that one moves nothing the user sees. */
     private fun findScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (!node.isVisibleToUser) return null
         if (node.isScrollable) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -156,15 +169,28 @@ class CaptureAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * rootInActiveWindow can resolve to our own overlay right after the user taps its "ler
-     * tela" button — that tap is what most recently made a window "active". Look at every
-     * window instead and pick the foreground app one explicitly, skipping our own package.
+     * Picks the window whose content the user is actually looking at.
      *
-     * [windows] isn't guaranteed to be ordered top-to-bottom: some apps (e.g. Gmail, briefly,
-     * right after opening an email) keep a previous screen's window alive underneath the new
-     * one, and both show up here with the same package name. Iterating in list order can then
-     * return the wrong one. [AccessibilityWindowInfo.getLayer] is the documented Z-order signal
-     * (higher layer = more on top), so pick candidates by that instead of by list position.
+     * rootInActiveWindow is no good here: it can resolve to our own overlay right after the
+     * user taps its "ler tela" button — that tap is what most recently made a window
+     * "active". And [windows] isn't ordered top-to-bottom, so list position tells us nothing
+     * either. Apps that keep a previous screen's window alive underneath the new one (Gmail
+     * does this when you open a message) show up as two windows with the same package name,
+     * and picking the wrong one is what makes the reader announce the message list instead of
+     * the open message.
+     *
+     * Three signals decide it, in order:
+     *
+     * 1. **Input focus.** Exactly one window holds it, and it is by definition the screen the
+     *    user is interacting with. Our panel is `FLAG_NOT_FOCUSABLE`, so tapping "ler tela"
+     *    never takes focus away from the app — the flag still points at the open message.
+     * 2. **Visible area.** Walking from the highest [AccessibilityWindowInfo.getLayer] down
+     *    and subtracting each window's bounds as we go leaves every window with the area it
+     *    actually shows. A stale window that a newer screen fully covers is left with none.
+     * 3. **Z-order**, as the final tie-break.
+     *
+     * Layer alone was the previous cut at this and wasn't enough: a window kept alive
+     * underneath can still sort above the one on display.
      */
     private fun findForegroundAppRoot(): AccessibilityNodeInfo? {
         val allWindows = windows
@@ -178,14 +204,120 @@ class CaptureAccessibilityService : AccessibilityService() {
         val topmostFirst = allWindows
             .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
             .sortedByDescending { it.layer }
+
+        val coveredFromAbove = Region()
+        val bounds = Rect()
+        val candidates = mutableListOf<WindowCandidate>()
         for (window in topmostFirst) {
-            val root = window.root
-            if (root != null && root.packageName?.toString() != packageName) {
-                return root
+            window.getBoundsInScreen(bounds)
+            val visible = Region(bounds)
+            val visibleArea = if (!bounds.isEmpty && visible.op(coveredFromAbove, Region.Op.DIFFERENCE)) {
+                visible.area()
+            } else {
+                0L
             }
-            root?.recycle()
+            if (!bounds.isEmpty) coveredFromAbove.op(bounds, Region.Op.UNION)
+
+            val root = window.root ?: continue
+            // Our own settings screen isn't what the user wants read back to them.
+            if (root.packageName?.toString() == packageName) {
+                root.recycle()
+                continue
+            }
+            candidates += WindowCandidate(root, window.isFocused, window.isActive, visibleArea, window.layer)
         }
-        return null
+
+        val best = candidates.maxWithOrNull(
+            compareBy<WindowCandidate>({ it.focused }, { it.active }, { it.visibleArea }, { it.layer }),
+        )
+        candidates.forEach { if (it !== best) it.root.recycle() }
+        if (best == null) return null
+        Log.d(
+            TAG,
+            "findForegroundAppRoot: chose ${best.root.packageName} " +
+                "(focused=${best.focused} active=${best.active} visibleArea=${best.visibleArea} layer=${best.layer})",
+        )
+        return best.root
+    }
+
+    /** One window in the running for [findForegroundAppRoot], with the signals used to rank it. */
+    private class WindowCandidate(
+        val root: AccessibilityNodeInfo,
+        val focused: Boolean,
+        val active: Boolean,
+        val visibleArea: Long,
+        val layer: Int,
+    )
+
+    /** Total pixel area this region covers — used to compare how much of each window is left uncovered. */
+    private fun Region.area(): Long {
+        var total = 0L
+        val iterator = RegionIterator(this)
+        val rect = Rect()
+        while (iterator.next(rect)) {
+            total += rect.width().toLong() * rect.height().toLong()
+        }
+        return total
+    }
+
+    /**
+     * Collects the text of everything the user can actually see, one segment per element.
+     *
+     * Picking the right window isn't enough on its own: apps commonly keep a previous screen
+     * mounted inside the *same* window, behind the one on display. Gmail is the case that
+     * prompted this — the message list stays in the tree under an opened message, so a plain
+     * full-tree walk reads the list. Two filters keep that content out:
+     *
+     * 1. A node reporting `isVisibleToUser == false` is skipped along with its subtree. This
+     *    is the same signal TalkBack uses to decide what is speakable, and it covers screens
+     *    that were hidden (GONE) rather than removed.
+     * 2. Siblings are examined back-to-front — a View draws over its earlier siblings — and a
+     *    sibling whose bounds are fully covered by later siblings that did produce text is
+     *    skipped. That catches the screen that is still laid out, still reports itself as
+     *    visible, and is simply underneath.
+     *
+     * Only the *decision* is made back-to-front; each child's segments are merged back in
+     * normal front-to-back order, so the reading order the user hears is unchanged. A
+     * covering sibling only counts once it has yielded text of its own, so an empty
+     * full-screen container (a touch interceptor, a transparent scrim) can't silence the
+     * content behind it.
+     */
+    private fun collectVisibleText(node: AccessibilityNodeInfo, into: MutableList<String>) {
+        if (!node.isVisibleToUser) return
+
+        val childSegments = arrayOfNulls<List<String>>(node.childCount)
+        val coveredByLaterSiblings = Region()
+        val childBounds = Rect()
+        for (i in node.childCount - 1 downTo 0) {
+            val child = node.getChild(i) ?: continue
+            child.getBoundsInScreen(childBounds)
+            val stillVisible = childBounds.isEmpty ||
+                Region(childBounds).op(coveredByLaterSiblings, Region.Op.DIFFERENCE)
+            if (stillVisible) {
+                val collected = mutableListOf<String>()
+                collectVisibleText(child, collected)
+                if (collected.isNotEmpty()) {
+                    childSegments[i] = collected
+                    if (!childBounds.isEmpty) coveredByLaterSiblings.op(childBounds, Region.Op.UNION)
+                }
+            }
+            child.recycle()
+        }
+
+        appendSegment(extractText(node), into)
+        for (segments in childSegments) {
+            segments?.forEach { appendSegment(it, into) }
+        }
+    }
+
+    /** Unfiltered walk, kept as the safety net for apps whose containers mis-report their visibility. */
+    private fun collectAllText(node: AccessibilityNodeInfo, into: MutableList<String>) {
+        appendSegment(extractText(node), into)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectAllText(child, into)
+            child.recycle()
+        }
     }
 
     /**
@@ -195,14 +327,8 @@ class CaptureAccessibilityService : AccessibilityService() {
      * segment identical to the one immediately before it removes that echo without touching
      * intentional repeats that are further apart (e.g. a recurring section header).
      */
-    private fun collectText(node: AccessibilityNodeInfo, into: MutableList<String>) {
-        val text = extractText(node)
+    private fun appendSegment(text: String, into: MutableList<String>) {
         if (text.isNotBlank() && text != into.lastOrNull()) into.add(text)
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            collectText(child, into)
-            child.recycle()
-        }
     }
 
     private fun stopReading() {
