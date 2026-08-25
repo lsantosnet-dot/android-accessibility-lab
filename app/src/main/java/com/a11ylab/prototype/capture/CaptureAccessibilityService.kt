@@ -180,9 +180,16 @@ class CaptureAccessibilityService : AccessibilityService() {
         return null
     }
 
+    /**
+     * WebView-rendered content (e.g. an HTML email opened in Gmail) commonly exposes the same
+     * string twice in a row in the accessibility tree — a container's contentDescription mirrors
+     * its single text child, or adjacent nodes both describe the same rendered text. Skipping a
+     * segment identical to the one immediately before it removes that echo without touching
+     * intentional repeats that are further apart (e.g. a recurring section header).
+     */
     private fun collectText(node: AccessibilityNodeInfo, into: MutableList<String>) {
         val text = extractText(node)
-        if (text.isNotBlank()) into.add(text)
+        if (text.isNotBlank() && text != into.lastOrNull()) into.add(text)
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             collectText(child, into)
