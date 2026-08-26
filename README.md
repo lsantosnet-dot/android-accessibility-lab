@@ -76,6 +76,11 @@ Se nada sobrar desse filtro — alguns apps reportam `isVisibleToUser` errado
 nos contêineres —, o serviço cai de volta na leitura da árvore inteira, para
 não ficar mudo.
 
+Na **rolagem automática**, cada ciclo lê só o que ainda não foi lido: uma
+rolagem raramente avança uma tela inteira e cabeçalhos não se movem, então
+capturas consecutivas se sobrepõem bastante. O serviço guarda os trechos já
+falados na sessão e encerra quando uma captura não traz nada novo.
+
 ## Privacidade
 
 - Nada é persistido em disco além da velocidade/tom de voz escolhidos.

@@ -35,7 +35,15 @@ class CaptureAccessibilityService : AccessibilityService() {
     private lateinit var mediaSessionController: MediaSessionController
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var lastAutoScrollSegments: List<String>? = null
+    /**
+     * Everything already spoken in the current auto-scroll session.
+     *
+     * A scroll rarely advances a full screenful, and headers/toolbars don't move at all, so
+     * consecutive captures overlap heavily. Reading each capture whole meant speaking the
+     * overlap again on every cycle — the "it kept repeating parts" symptom. Only segments not
+     * in this set get read, and the session ends when a capture adds nothing new.
+     */
+    private val autoScrollAlreadyRead = linkedSetOf<String>()
 
     /** Mirrors [ScreenReader.onStateChanged] so [handleMediaControl]'s play/pause toggle knows what to do. */
     private var readerState = ReaderState.IDLE
@@ -86,7 +94,7 @@ class CaptureAccessibilityService : AccessibilityService() {
         Log.d(TAG, "autoScrollReading=$enabling")
         overlayManager.setKeepScreenOnDimmed(enabling)
         if (enabling) {
-            lastAutoScrollSegments = null
+            autoScrollAlreadyRead.clear()
             screenReader.onReadingFinished = { mainHandler.post(::onAutoScrollChunkFinished) }
             readAndTrackAutoScroll()
         } else {
@@ -108,14 +116,16 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private fun readAndTrackAutoScroll() {
         if (!CaptureBus.isAutoScrollReading.value) return
-        val segments = captureForegroundSegments()
-        if (segments.isNullOrEmpty() || segments == lastAutoScrollSegments) {
-            Log.d(TAG, "auto-scroll: no new content, stopping")
+        val segments = captureForegroundSegments().orEmpty()
+        val fresh = segments.filterNot { it in autoScrollAlreadyRead }
+        if (fresh.isEmpty()) {
+            Log.d(TAG, "auto-scroll: capture of ${segments.size} segment(s) held nothing new, stopping")
             stopAutoScroll()
             return
         }
-        lastAutoScrollSegments = segments
-        screenReader.read(segments)
+        Log.d(TAG, "auto-scroll: reading ${fresh.size} new of ${segments.size} captured segment(s)")
+        autoScrollAlreadyRead += fresh
+        screenReader.read(fresh)
     }
 
     private fun stopAutoScroll() {
