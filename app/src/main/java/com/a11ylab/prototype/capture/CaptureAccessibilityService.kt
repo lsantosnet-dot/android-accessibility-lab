@@ -25,8 +25,21 @@ import com.a11ylab.prototype.reader.SpeechPrefs
 
 private const val TAG = "CaptureService"
 
-/** Gives a scrolled screen a moment to finish laying out new content before it's captured. */
-private const val SCROLL_SETTLE_DELAY_MS = 500L
+/**
+ * Gives a scrolled screen a moment to finish laying out new content before it's captured.
+ * WebViews need the larger share of this: their accessibility nodes still report
+ * pre-scroll bounds for a while after the scroll lands, and a capture taken then reads
+ * content that is no longer on screen.
+ */
+private const val SCROLL_SETTLE_DELAY_MS = 1200L
+
+/** Below this normalized length, auto-scroll dedupe requires an exact match — short strings substring-match too easily. */
+private const val MIN_FUZZY_DEDUPE_LENGTH = 12
+
+private val WHITESPACE = Regex("\\s+")
+
+/** The form segments are compared in for duplicate detection, so spacing and case differences don't defeat it. */
+private fun normalizeForDedupe(segment: String) = segment.trim().replace(WHITESPACE, " ").lowercase()
 
 /**
  * How much of a node may peek out from under the siblings covering it and still count as
@@ -44,14 +57,34 @@ class CaptureAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Everything already spoken in the current auto-scroll session.
+     * Everything already spoken in the current auto-scroll session, normalized, in read order.
      *
      * A scroll rarely advances a full screenful, and headers/toolbars don't move at all, so
      * consecutive captures overlap heavily. Reading each capture whole meant speaking the
-     * overlap again on every cycle — the "it kept repeating parts" symptom. Only segments not
-     * in this set get read, and the session ends when a capture adds nothing new.
+     * overlap again on every cycle — the "it kept repeating parts" symptom. Only segments
+     * that [alreadyReadInAutoScroll] doesn't recognize get read, and the session ends when a
+     * capture adds nothing new.
      */
-    private val autoScrollAlreadyRead = linkedSetOf<String>()
+    private val autoScrollAlreadyRead = mutableListOf<String>()
+
+    /**
+     * Whether [segment] repeats something this auto-scroll session already spoke.
+     *
+     * Exact matching isn't enough: a WebView re-chunks its accessibility nodes as content
+     * scrolls, so text that was already read can come back merged with a neighbor (the
+     * Gmail recording that drove this heard "Folha de S.Paulo Quinta-feira, 27 de agosto…"
+     * re-spoken as one segment after its pieces had each been read) and an exact set lets
+     * the repeat through. A segment therefore also counts as read when it appears inside
+     * something read, or when something read makes up most of it (6/10 of its length).
+     */
+    private fun alreadyReadInAutoScroll(segment: String): Boolean {
+        val normalized = normalizeForDedupe(segment)
+        if (normalized.length < MIN_FUZZY_DEDUPE_LENGTH) return autoScrollAlreadyRead.any { it == normalized }
+        return autoScrollAlreadyRead.any { read ->
+            read.contains(normalized) ||
+                (normalized.contains(read) && read.length * 10 >= normalized.length * 6)
+        }
+    }
 
     /** Mirrors [ScreenReader.onStateChanged] so [handleMediaControl]'s play/pause toggle knows what to do. */
     private var readerState = ReaderState.IDLE
@@ -125,14 +158,14 @@ class CaptureAccessibilityService : AccessibilityService() {
     private fun readAndTrackAutoScroll() {
         if (!CaptureBus.isAutoScrollReading.value) return
         val segments = captureForegroundSegments().orEmpty()
-        val fresh = segments.filterNot { it in autoScrollAlreadyRead }
+        val fresh = segments.filterNot(::alreadyReadInAutoScroll)
         if (fresh.isEmpty()) {
             Log.d(TAG, "auto-scroll: capture of ${segments.size} segment(s) held nothing new, stopping")
             stopAutoScroll()
             return
         }
         Log.d(TAG, "auto-scroll: reading ${fresh.size} new of ${segments.size} captured segment(s)")
-        autoScrollAlreadyRead += fresh
+        fresh.mapTo(autoScrollAlreadyRead, ::normalizeForDedupe)
         screenReader.read(fresh)
     }
 
@@ -156,8 +189,17 @@ class CaptureAccessibilityService : AccessibilityService() {
             collectAllText(app.root, segments)
         }
         app.root.recycle()
-        Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s)")
-        return segments
+        // One screen commonly exposes the same string through more than one node, and not
+        // always adjacently, so the consecutive-duplicate rule in appendSegment isn't
+        // enough. Within a single capture a repeated string is chrome or echo, not content
+        // — keep the first occurrence, in reading order.
+        val deduped = mutableListOf<String>()
+        val seen = hashSetOf<String>()
+        for (segment in segments) {
+            if (seen.add(normalizeForDedupe(segment))) deduped += segment
+        }
+        Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s), ${deduped.size} after dedupe")
+        return deduped
     }
 
     /**
@@ -362,6 +404,22 @@ class CaptureAccessibilityService : AccessibilityService() {
         into: VisibleContent,
     ) {
         if (!node.isVisibleToUser) return
+
+        // A node with text of its own speaks for its whole subtree. WebView links and
+        // headings carry their text on the node *and* repeat it piece by piece on
+        // descendant nodes; reading both levels was the "…recebe essa… recebe essa…"
+        // stutter heard in testing. Native text views are leaves, so they lose nothing.
+        if (node.isPassword) {
+            appendSegment("••••••", into.segments)
+            return
+        }
+        val ownText = node.text?.toString().orEmpty()
+        if (ownText.isNotBlank()) {
+            appendSegment(ownText, into.segments)
+            if (node.isScrollable) into.scrollables += AccessibilityNodeInfo.obtain(node)
+            markPainted(node, ownText, clip, paintedAbove)
+            return
+        }
 
         val children = (0 until node.childCount).mapNotNull { i -> node.getChild(i)?.let { i to it } }
         val topmostFirst = children.sortedWith(

@@ -109,7 +109,19 @@ próximo app que ler errado.
 Na **rolagem automática**, cada ciclo lê só o que ainda não foi lido: uma
 rolagem raramente avança uma tela inteira e cabeçalhos não se movem, então
 capturas consecutivas se sobrepõem bastante. O serviço guarda os trechos já
-falados na sessão e encerra quando uma captura não traz nada novo.
+falados na sessão e encerra quando uma captura não traz nada novo. A
+comparação não é literal: WebViews reagrupam seus nós conforme o conteúdo
+rola, e o mesmo texto volta fundido com o vizinho — um trecho também conta
+como lido quando aparece dentro de algo já falado, ou quando algo já falado
+compõe a maior parte dele. A captura pós-rolagem espera 1,2s: os nós da
+WebView reportam os limites antigos por um tempo depois que a rolagem
+assenta.
+
+Contra **repetições**: um nó com texto próprio fala pela sua subárvore
+inteira (links e títulos de WebView repetem o texto pedaço a pedaço nos
+descendentes — ler os dois níveis era um gaguejo audível), e dentro de uma
+mesma captura uma string repetida é eco ou moldura, não conteúdo: fica só a
+primeira ocorrência, na ordem de leitura.
 
 ## Privacidade
 
