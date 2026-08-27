@@ -28,6 +28,14 @@ private const val TAG = "CaptureService"
 /** Gives a scrolled screen a moment to finish laying out new content before it's captured. */
 private const val SCROLL_SETTLE_DELAY_MS = 500L
 
+/**
+ * How much of a node may peek out from under the siblings covering it and still count as
+ * hidden. A screen sliding out from behind another commonly leaves a sliver uncovered (a
+ * strip beside a navigation bar, an off-by-a-few-pixels pane bound), and reading a whole
+ * screen for its sliver is exactly the mixed-content bug this filter exists to prevent.
+ */
+private const val COVERAGE_TOLERANCE = 0.03
+
 class CaptureAccessibilityService : AccessibilityService() {
 
     private lateinit var overlayManager: OverlayManager
@@ -136,39 +144,57 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     /** Captures the foreground app's text, one entry per screen element — the units [ScreenReader] reads and skips between. */
     private fun captureForegroundSegments(): List<String>? {
-        val root = findForegroundAppRoot() ?: return null
-        val segments = mutableListOf<String>()
-        collectVisibleText(root, segments)
+        val app = findForegroundApp() ?: return null
+        val content = collectVisibleContent(app.root, app.bounds)
+        content.scrollables.forEach { it.recycle() }
+        val segments = content.segments
         if (segments.isEmpty()) {
             // Nothing survived the visibility/occlusion filter. Some apps mis-report
             // isVisibleToUser on their container nodes, and reading a possibly-stale screen
             // still beats reading nothing at all — so fall back to the unfiltered tree.
             Log.w(TAG, "captureForegroundSegments: visible pass came back empty, falling back to full tree")
-            collectAllText(root, segments)
+            collectAllText(app.root, segments)
         }
-        root.recycle()
+        app.root.recycle()
         Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s)")
         return segments
     }
 
-    /** Scrolls the foreground app's nearest scrollable container forward. Returns false at the end of content. */
+    /**
+     * Scrolls the container the user is actually looking at. Returns false at the end of content.
+     *
+     * The same walk that filters what gets *read* also decides what gets *scrolled*: the first
+     * surviving scrollable (shallowest, in reading order). Picking any visible-flagged scrollable,
+     * the previous behavior, could land on the list a screen kept alive behind the one on display —
+     * Gmail's inbox behind an open message — and auto-scroll would then page the hidden inbox,
+     * feeding its rows into the next capture as "new" content mixed into the message being read.
+     */
     private fun scrollForward(): Boolean {
-        val root = findForegroundAppRoot() ?: return false
-        val scrollable = findScrollableNode(root)
-        val performed = scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
-        if (scrollable != null && scrollable !== root) scrollable.recycle()
-        root.recycle()
+        val app = findForegroundApp() ?: return false
+        val content = collectVisibleContent(app.root, app.bounds)
+        val fromWalk = content.scrollables.firstOrNull()
+        // Same safety net as the text side: apps that mis-report visibility leave the walk empty.
+        val legacy = if (fromWalk == null) findAnyScrollableNode(app.root, app.bounds) else null
+        val target = fromWalk ?: legacy
+        val performed = target?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
+        Log.d(TAG, "scrollForward: target=${target?.className} performed=$performed")
+        content.scrollables.forEach { it.recycle() }
+        if (legacy != null && legacy !== app.root) legacy.recycle()
+        app.root.recycle()
         return performed
     }
 
-    /** Skips invisible subtrees for the same reason [collectVisibleText] does: a screen kept alive behind
-     *  the one on display still exposes its scrollable list, and scrolling that one moves nothing the user sees. */
-    private fun findScrollableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    /** Unfiltered scrollable lookup, the fallback mirror of [collectAllText]. Still skips subtrees
+     *  that say they're invisible or sit fully off-screen — scrolling those moves nothing the user sees. */
+    private fun findAnyScrollableNode(node: AccessibilityNodeInfo, clip: Rect): AccessibilityNodeInfo? {
         if (!node.isVisibleToUser) return null
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (!bounds.isEmpty && !Rect.intersects(bounds, clip)) return null
         if (node.isScrollable) return node
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val found = findScrollableNode(child)
+            val found = findAnyScrollableNode(child, clip)
             if (found != null) {
                 if (found !== child) child.recycle()
                 return found
@@ -202,11 +228,11 @@ class CaptureAccessibilityService : AccessibilityService() {
      * Layer alone was the previous cut at this and wasn't enough: a window kept alive
      * underneath can still sort above the one on display.
      */
-    private fun findForegroundAppRoot(): AccessibilityNodeInfo? {
+    private fun findForegroundApp(): ForegroundApp? {
         val allWindows = windows
         Log.d(
             TAG,
-            "findForegroundAppRoot: ${allWindows.size} window(s): " +
+            "findForegroundApp: ${allWindows.size} window(s): " +
                 allWindows.joinToString {
                     "type=${it.type} layer=${it.layer} active=${it.isActive} focused=${it.isFocused} title=${it.title}"
                 },
@@ -234,7 +260,7 @@ class CaptureAccessibilityService : AccessibilityService() {
                 root.recycle()
                 continue
             }
-            candidates += WindowCandidate(root, window.isFocused, window.isActive, visibleArea, window.layer)
+            candidates += WindowCandidate(root, window.isFocused, window.isActive, visibleArea, window.layer, Rect(bounds))
         }
 
         val best = candidates.maxWithOrNull(
@@ -244,19 +270,24 @@ class CaptureAccessibilityService : AccessibilityService() {
         if (best == null) return null
         Log.d(
             TAG,
-            "findForegroundAppRoot: chose ${best.root.packageName} " +
-                "(focused=${best.focused} active=${best.active} visibleArea=${best.visibleArea} layer=${best.layer})",
+            "findForegroundApp: chose ${best.root.packageName} " +
+                "(focused=${best.focused} active=${best.active} visibleArea=${best.visibleArea} " +
+                "layer=${best.layer} bounds=${best.bounds})",
         )
-        return best.root
+        return ForegroundApp(best.root, best.bounds)
     }
 
-    /** One window in the running for [findForegroundAppRoot], with the signals used to rank it. */
+    /** The window [findForegroundApp] chose, with its on-screen bounds — the clip for everything captured from it. */
+    private class ForegroundApp(val root: AccessibilityNodeInfo, val bounds: Rect)
+
+    /** One window in the running for [findForegroundApp], with the signals used to rank it. */
     private class WindowCandidate(
         val root: AccessibilityNodeInfo,
         val focused: Boolean,
         val active: Boolean,
         val visibleArea: Long,
         val layer: Int,
+        val bounds: Rect,
     )
 
     /** Total pixel area this region covers — used to compare how much of each window is left uncovered. */
@@ -270,54 +301,99 @@ class CaptureAccessibilityService : AccessibilityService() {
         return total
     }
 
+    /** Everything that survived the visibility walk: the text to read, and the scrollable containers it lives in. */
+    private class VisibleContent {
+        val segments = mutableListOf<String>()
+
+        /** Owned copies, shallowest-first in reading order — every consumer must recycle them. */
+        val scrollables = mutableListOf<AccessibilityNodeInfo>()
+    }
+
+    private fun collectVisibleContent(root: AccessibilityNodeInfo, clip: Rect): VisibleContent {
+        val content = VisibleContent()
+        collectVisibleContentInto(root, clip, content)
+        return content
+    }
+
     /**
      * Collects the text of everything the user can actually see, one segment per element.
      *
      * Picking the right window isn't enough on its own: apps commonly keep a previous screen
-     * mounted inside the *same* window, behind the one on display. Gmail is the case that
-     * prompted this — the message list stays in the tree under an opened message, so a plain
-     * full-tree walk reads the list. Two filters keep that content out:
+     * mounted inside the *same* window as the one on display. Gmail is the case that keeps
+     * prompting this — the message list stays in the tree under an opened message, so a plain
+     * full-tree walk mixes the inbox into the message. Three filters keep that content out:
      *
      * 1. A node reporting `isVisibleToUser == false` is skipped along with its subtree. This
      *    is the same signal TalkBack uses to decide what is speakable, and it covers screens
      *    that were hidden (GONE) rather than removed.
-     * 2. Siblings are examined back-to-front — a View draws over its earlier siblings — and a
-     *    sibling whose bounds are fully covered by later siblings that did produce text is
-     *    skipped. That catches the screen that is still laid out, still reports itself as
-     *    visible, and is simply underneath.
+     * 2. A node whose bounds don't touch [clip] — the chosen window's on-screen area — is
+     *    skipped along with its subtree. A pane *slid out of view* (Gmail parks the message
+     *    list beside the open message in its two-pane layout, even on phones) still reports
+     *    itself visible, and off-screen bounds can never be "covered" by anything on screen,
+     *    so the occlusion test below can't catch it — which is how earlier cuts at this
+     *    filter still let the inbox through. All geometry below uses bounds clipped to
+     *    [clip] for the same reason.
+     * 3. Siblings are examined topmost-first — by [AccessibilityNodeInfo.getDrawingOrder]
+     *    where the app reports it, falling back to child index (a View draws over its
+     *    earlier siblings) — and a sibling whose clipped bounds are covered by the siblings
+     *    above it that produced text is skipped. "Covered" tolerates a sliver of
+     *    [COVERAGE_TOLERANCE] left showing, so a screen peeking out from under the one on
+     *    top isn't read whole on account of the peek.
      *
-     * Only the *decision* is made back-to-front; each child's segments are merged back in
-     * normal front-to-back order, so the reading order the user hears is unchanged. A
-     * covering sibling only counts once it has yielded text of its own, so an empty
-     * full-screen container (a touch interceptor, a transparent scrim) can't silence the
-     * content behind it.
+     * Only the *decision* is made top-down; each child's segments are merged back in child
+     * order, so the reading order the user hears is unchanged. A covering sibling only
+     * counts once it has yielded text of its own, so an empty full-screen container (a
+     * touch interceptor, a transparent scrim) can't silence the content behind it.
+     *
+     * Scrollable nodes on surviving paths are collected along the way, so scrolling targets
+     * the same content reading does.
      */
-    private fun collectVisibleText(node: AccessibilityNodeInfo, into: MutableList<String>) {
+    private fun collectVisibleContentInto(node: AccessibilityNodeInfo, clip: Rect, into: VisibleContent) {
         if (!node.isVisibleToUser) return
 
-        val childSegments = arrayOfNulls<List<String>>(node.childCount)
-        val coveredByLaterSiblings = Region()
+        val children = (0 until node.childCount).mapNotNull { i -> node.getChild(i)?.let { i to it } }
+        val topmostFirst = children.sortedWith(
+            compareByDescending<Pair<Int, AccessibilityNodeInfo>> { it.second.drawingOrder }
+                .thenByDescending { it.first },
+        )
+
+        val childContent = arrayOfNulls<VisibleContent>(node.childCount)
+        val coveredFromTop = Region()
         val childBounds = Rect()
-        for (i in node.childCount - 1 downTo 0) {
-            val child = node.getChild(i) ?: continue
+        for ((index, child) in topmostFirst) {
             child.getBoundsInScreen(childBounds)
-            val stillVisible = childBounds.isEmpty ||
-                Region(childBounds).op(coveredByLaterSiblings, Region.Op.DIFFERENCE)
-            if (stillVisible) {
-                val collected = mutableListOf<String>()
-                collectVisibleText(child, collected)
-                if (collected.isNotEmpty()) {
-                    childSegments[i] = collected
-                    if (!childBounds.isEmpty) coveredByLaterSiblings.op(childBounds, Region.Op.UNION)
+            val clipped = Rect(childBounds)
+            val onScreen = childBounds.isEmpty || clipped.intersect(clip)
+            if (!onScreen) {
+                Log.d(TAG, "collect: dropping off-screen ${child.className} at $childBounds")
+            } else if (!childBounds.isEmpty && isEffectivelyCovered(clipped, coveredFromTop)) {
+                Log.d(TAG, "collect: dropping covered ${child.className} at $clipped")
+            } else {
+                val content = VisibleContent()
+                collectVisibleContentInto(child, clip, content)
+                childContent[index] = content
+                if (content.segments.isNotEmpty() && !childBounds.isEmpty) {
+                    coveredFromTop.op(clipped, Region.Op.UNION)
                 }
             }
             child.recycle()
         }
 
-        appendSegment(extractText(node), into)
-        for (segments in childSegments) {
-            segments?.forEach { appendSegment(it, into) }
+        appendSegment(extractText(node), into.segments)
+        if (node.isScrollable) into.scrollables += AccessibilityNodeInfo.obtain(node)
+        for (content in childContent) {
+            content ?: continue
+            content.segments.forEach { appendSegment(it, into.segments) }
+            into.scrollables += content.scrollables
         }
+    }
+
+    /** True when [covered] hides all of [bounds] but at most a [COVERAGE_TOLERANCE]-sized sliver. */
+    private fun isEffectivelyCovered(bounds: Rect, covered: Region): Boolean {
+        val remainder = Region(bounds)
+        if (!remainder.op(covered, Region.Op.DIFFERENCE)) return true
+        val boundsArea = bounds.width().toLong() * bounds.height()
+        return remainder.area() <= boundsArea * COVERAGE_TOLERANCE
     }
 
     /** Unfiltered walk, kept as the safety net for apps whose containers mis-report their visibility. */
