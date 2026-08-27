@@ -75,12 +75,25 @@ de acessibilidade. Sem cuidado, o leitor acaba lendo a lista, não a mensagem.
    até em celular) continua se declarando visível, e limites fora da tela
    nunca são "cobertos" por nada, então o teste de oclusão sozinho não o
    pega — foi por aí que as tentativas anteriores deixaram a caixa de
-   entrada vazar para a leitura. Por fim, irmãos são avaliados do mais
+   entrada vazar para a leitura. Por fim, os nós são avaliados do mais
    acima para o mais abaixo — pela `drawingOrder` real quando o app a
-   informa, senão pela posição entre os irmãos — e um irmão coberto pelos
-   de cima que produziram texto é descartado, com tolerância de 3% para a
-   tela de trás que aparece por uma fresta. A ordem de leitura em voz alta
-   continua normal: só a *decisão* é feita de cima para baixo.
+   informa, senão pela posição entre os irmãos — e um nó coberto pelos
+   *pixels realmente pintados* acima dele é descartado, com tolerância de
+   3% para a tela de trás que aparece por uma fresta. Só conta como
+   pintado o que desenha de fato: nós com texto próprio e folhas sem
+   filhos (imagens, ícones) de até meia janela — os limites de um
+   contêiner **não** são sua área pintada. O Gmail provou isso: um overlay
+   nativo de janela inteira (cabeçalho do remetente, barra de responder)
+   flutua sobre a WebView da mensagem, e tratar os limites do contêiner
+   como cobertura apagava o corpo do e-mail inteiro da leitura. A ordem de
+   leitura em voz alta continua normal: só a *decisão* é feita de cima
+   para baixo.
+
+O serviço se declara `feedbackSpoken` e `isAccessibilityTool` no XML — não
+é cosmético: WebViews baseadas em Chromium entregam uma árvore de
+acessibilidade reduzida (só controles interativos, sem texto estático) a
+serviços que elas não classificam como leitores de tela, o que aparecia
+como "lê os botões do Gmail mas não o corpo do e-mail".
 
 A **rolagem automática** usa essa mesma travessia para escolher *o que*
 rolar. Antes ela rolava o primeiro scrollable visível da árvore, que podia

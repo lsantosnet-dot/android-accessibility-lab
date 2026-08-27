@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- feedbackSpoken (not feedbackGeneric) and isAccessibilityTool matter beyond Settings
+     cosmetics: Chromium-based WebViews serve services they don't classify as screen
+     readers a reduced accessibility tree (interactive controls only, no static text),
+     which read as "the buttons are spoken but the email body isn't" in Gmail. This
+     service speaks the screen aloud, so spoken feedback is also simply the truth. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused|typeViewTextChanged"
-    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFeedbackType="feedbackSpoken"
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
     android:canRetrieveWindowContent="true"
+    android:isAccessibilityTool="true"
     android:notificationTimeout="100"
     android:description="@string/service_description" />
