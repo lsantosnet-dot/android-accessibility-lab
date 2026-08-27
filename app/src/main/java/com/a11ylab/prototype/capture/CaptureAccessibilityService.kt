@@ -311,7 +311,7 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     private fun collectVisibleContent(root: AccessibilityNodeInfo, clip: Rect): VisibleContent {
         val content = VisibleContent()
-        collectVisibleContentInto(root, clip, content)
+        collectVisibleContentInto(root, clip, Region(), content)
         return content
     }
 
@@ -335,20 +335,32 @@ class CaptureAccessibilityService : AccessibilityService() {
      *    [clip] for the same reason.
      * 3. Siblings are examined topmost-first — by [AccessibilityNodeInfo.getDrawingOrder]
      *    where the app reports it, falling back to child index (a View draws over its
-     *    earlier siblings) — and a sibling whose clipped bounds are covered by the siblings
-     *    above it that produced text is skipped. "Covered" tolerates a sliver of
+     *    earlier siblings) — and a node whose clipped bounds are covered by the *pixels
+     *    actually painted* above it is skipped. "Covered" tolerates a sliver of
      *    [COVERAGE_TOLERANCE] left showing, so a screen peeking out from under the one on
      *    top isn't read whole on account of the peek.
      *
+     * What counts as painted matters as much as the test. Only nodes that visibly draw
+     * something enter [paintedAbove]: nodes with text of their own, and childless leaves
+     * (images, icons) no bigger than half the window — see [markPainted]. A container's
+     * full bounds are NOT its painted area: Gmail's open message is the case that proved
+     * this, floating a full-window native overlay (the sender header, the reply bar) above
+     * the message WebView, and an earlier revision that counted the overlay's container
+     * bounds as cover blanked the entire message body out of the reading while the header
+     * around it was spoken.
+     *
      * Only the *decision* is made top-down; each child's segments are merged back in child
-     * order, so the reading order the user hears is unchanged. A covering sibling only
-     * counts once it has yielded text of its own, so an empty full-screen container (a
-     * touch interceptor, a transparent scrim) can't silence the content behind it.
+     * order, so the reading order the user hears is unchanged.
      *
      * Scrollable nodes on surviving paths are collected along the way, so scrolling targets
      * the same content reading does.
      */
-    private fun collectVisibleContentInto(node: AccessibilityNodeInfo, clip: Rect, into: VisibleContent) {
+    private fun collectVisibleContentInto(
+        node: AccessibilityNodeInfo,
+        clip: Rect,
+        paintedAbove: Region,
+        into: VisibleContent,
+    ) {
         if (!node.isVisibleToUser) return
 
         val children = (0 until node.childCount).mapNotNull { i -> node.getChild(i)?.let { i to it } }
@@ -358,7 +370,6 @@ class CaptureAccessibilityService : AccessibilityService() {
         )
 
         val childContent = arrayOfNulls<VisibleContent>(node.childCount)
-        val coveredFromTop = Region()
         val childBounds = Rect()
         for ((index, child) in topmostFirst) {
             child.getBoundsInScreen(childBounds)
@@ -366,26 +377,48 @@ class CaptureAccessibilityService : AccessibilityService() {
             val onScreen = childBounds.isEmpty || clipped.intersect(clip)
             if (!onScreen) {
                 Log.d(TAG, "collect: dropping off-screen ${child.className} at $childBounds")
-            } else if (!childBounds.isEmpty && isEffectivelyCovered(clipped, coveredFromTop)) {
+            } else if (!childBounds.isEmpty && isEffectivelyCovered(clipped, paintedAbove)) {
                 Log.d(TAG, "collect: dropping covered ${child.className} at $clipped")
             } else {
                 val content = VisibleContent()
-                collectVisibleContentInto(child, clip, content)
+                collectVisibleContentInto(child, clip, paintedAbove, content)
                 childContent[index] = content
-                if (content.segments.isNotEmpty() && !childBounds.isEmpty) {
-                    coveredFromTop.op(clipped, Region.Op.UNION)
-                }
             }
             child.recycle()
         }
 
-        appendSegment(extractText(node), into.segments)
+        val direct = extractText(node)
+        appendSegment(direct, into.segments)
         if (node.isScrollable) into.scrollables += AccessibilityNodeInfo.obtain(node)
         for (content in childContent) {
             content ?: continue
             content.segments.forEach { appendSegment(it, into.segments) }
             into.scrollables += content.scrollables
         }
+
+        // A node's own pixels join the painted region only after its subtree ran: a View's
+        // background sits *under* its children, and must not count as cover for them —
+        // only for the siblings (and their subtrees) below this node in drawing order.
+        markPainted(node, direct, clip, paintedAbove)
+    }
+
+    /**
+     * Adds the pixels [node] itself draws to [painted]: its bounds when it carries text of
+     * its own, or when it's a childless leaf (an image, an icon). A childless leaf bigger
+     * than half the window doesn't count — that shape is a touch interceptor or scrim, not
+     * content, and it must not silence what's underneath.
+     */
+    private fun markPainted(node: AccessibilityNodeInfo, direct: String, clip: Rect, painted: Region) {
+        if (direct.isBlank() && node.childCount != 0) return
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (bounds.isEmpty || !bounds.intersect(clip)) return
+        if (direct.isBlank()) {
+            val leafArea = bounds.width().toLong() * bounds.height()
+            val clipArea = clip.width().toLong() * clip.height()
+            if (leafArea * 2 > clipArea) return
+        }
+        painted.op(bounds, Region.Op.UNION)
     }
 
     /** True when [covered] hides all of [bounds] but at most a [COVERAGE_TOLERANCE]-sized sliver. */
