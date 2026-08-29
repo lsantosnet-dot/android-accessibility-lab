@@ -3,7 +3,22 @@
      cosmetics: Chromium-based WebViews serve services they don't classify as screen
      readers a reduced accessibility tree (interactive controls only, no static text),
      which read as "the buttons are spoken but the email body isn't" in Gmail. This
-     service speaks the screen aloud, so spoken feedback is also simply the truth. -->
+     service speaks the screen aloud, so spoken feedback is also simply the truth.
+
+     flagIncludeNotImportantViews is REQUIRED here, and a dump taken on a real Gmail
+     message (see captures/ and the README) is why. Chromium exposes every node inside a
+     WebView — the whole e-mail body, paragraph by paragraph — with
+     isImportantForAccessibility=false. Without this flag the system prunes all of it: the
+     same message that shows 680 characters of text with the flag on came back as
+     `WebView #conversation_webview … children=0` with it off, leaving the reader nothing
+     but the subject line, the toolbar icons and the bottom tabs. TalkBack gets away
+     without the flag because it never reads a screen in bulk — it speaks the node under
+     the user's finger, and Chromium answers those queries directly.
+
+     The cost of the flag is that this service also receives subtrees an app marked
+     `noHideDescendants` (a pane kept mounted behind the screen on display). That is
+     handled in the walk, not here. The flag can be turned off at runtime from the app's
+     screen, via setServiceInfo, to produce a comparison dump. -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused|typeViewTextChanged"
     android:accessibilityFeedbackType="feedbackSpoken"

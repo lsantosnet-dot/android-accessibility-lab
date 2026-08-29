@@ -16,10 +16,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -37,6 +41,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.a11ylab.prototype.capture.CaptureAccessibilityService
+import com.a11ylab.prototype.capture.CaptureTuning
 import com.a11ylab.prototype.reader.SPEECH_STEP
 import com.a11ylab.prototype.reader.SpeechPrefs
 import java.util.Locale
@@ -112,6 +117,9 @@ private fun StatusScreen(
     var notificationsOn by remember { mutableStateOf(isNotificationGranted()) }
     var rate by remember { mutableFloatStateOf(SpeechPrefs.rate(context)) }
     var pitch by remember { mutableFloatStateOf(SpeechPrefs.pitch(context)) }
+    var mainContentOnly by remember { mutableStateOf(CaptureTuning.readMainContentOnly(context)) }
+    var fullTree by remember { mutableStateOf(CaptureTuning.includeNotImportantViews(context)) }
+    var pixelOcclusion by remember { mutableStateOf(CaptureTuning.pixelOcclusionFilter(context)) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -136,6 +144,7 @@ private fun StatusScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -185,12 +194,79 @@ private fun StatusScreen(
             onAdjust = { delta -> pitch = CaptureAccessibilityService.adjustPitch(context, delta) },
         )
 
+        Text("Como a tela é lida", style = MaterialTheme.typography.titleMedium)
+
+        SettingSwitchRow(
+            label = "Ler só o conteúdo principal",
+            explanation = "Lê o container que tem o texto da tela — o corpo do e-mail, o " +
+                "artigo — em vez de cada palavra da janela. Desligado, um e-mail aberto vem " +
+                "com \"Caixa de entrada\", \"Arquivar\", \"Excluir\", \"Gemini\" e as abas de " +
+                "baixo em volta do texto, que é o que fazia parecer que ele estava lendo a " +
+                "tela inicial do Gmail. Desligue se quiser ouvir também remetente, assunto e " +
+                "botões.",
+            checked = mainContentOnly,
+            onCheckedChange = {
+                mainContentOnly = it
+                CaptureAccessibilityService.setReadMainContentOnly(context, it)
+            },
+        )
+
+        SettingSwitchRow(
+            label = "Árvore completa (precisa ficar ligada)",
+            explanation = "O Chromium marca todo o conteúdo de WebView como \"não importante " +
+                "para acessibilidade\". Sem esta opção o sistema poda essa árvore inteira e o " +
+                "corpo do e-mail simplesmente não existe para o app — sobram assunto, ícones " +
+                "e abas. Desligue só para gerar um dump de comparação, e ligue de volta.",
+            checked = fullTree,
+            onCheckedChange = {
+                fullTree = it
+                CaptureAccessibilityService.setIncludeNotImportantViews(context, it)
+            },
+        )
+
+        SettingSwitchRow(
+            label = "Filtro de oclusão por pixels",
+            explanation = "Heurística antiga: descarta um nó cujos limites parecem cobertos " +
+                "pelo que os irmãos acima dele pintam. É o filtro que uma vez apagou o corpo " +
+                "inteiro de um e-mail por engano. Ligue só para comparar.",
+            checked = pixelOcclusion,
+            onCheckedChange = {
+                pixelOcclusion = it
+                CaptureAccessibilityService.setPixelOcclusionFilter(context, it)
+            },
+        )
+
+        Text(
+            "O botão 🧪 dump no painel flutuante salva em Downloads a árvore de acessibilidade " +
+                "completa da tela que estiver aberta — é o que permite diagnosticar um app que " +
+                "lê errado sem precisar de adb.",
+        )
+
         Text(
             "Depois de ativar o serviço e conceder a permissão de overlay, use o botão " +
                 "acima para abrir o painel flutuante — ou simplesmente abra qualquer outro " +
                 "app, e ele vai aparecer automaticamente. Enquanto a leitura estiver ativa, " +
                 "um card com play/pause e avançar/voltar também aparece na tela de bloqueio.",
         )
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    label: String,
+    explanation: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(label, modifier = Modifier.padding(end = 12.dp))
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        }
+        Text(explanation, style = MaterialTheme.typography.bodySmall)
     }
 }
 

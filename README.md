@@ -33,6 +33,8 @@ painel pequeno.
 MainActivity                    → onboarding + status + configurações (Compose)
 capture/CaptureAccessibilityService → escuta os eventos, lê a árvore de nós
 capture/CaptureBus              → StateFlow em memória, estado de rolagem automática
+capture/CaptureTuning           → as duas chaves que decidem qual árvore é capturada (persistidas)
+capture/TreeDumper              → grava a árvore completa de todas as janelas num .txt em Downloads
 overlay/OverlayManager          → painel flutuante compacto (WindowManager + Views)
 reader/ScreenReader             → TTS + detecção de idioma
 reader/SpeechPrefs              → velocidade/tom persistidos, lidos pelo serviço e pela tela de configurações
@@ -55,56 +57,100 @@ serviço para o painel reaparecer depois de conceder a permissão de overlay.
 
 ## Como o app decide "qual tela ler"
 
-Apps costumam manter a tela anterior viva atrás da que está em exibição — o
-Gmail faz isso: ao abrir uma mensagem, a lista de e-mails continua na árvore
-de acessibilidade. Sem cuidado, o leitor acaba lendo a lista, não a mensagem.
-`CaptureAccessibilityService` resolve isso em duas etapas:
+Esta seção é o resultado de um diagnóstico feito em cima de dumps reais da
+árvore de acessibilidade (veja "Como diagnosticar" abaixo), depois de várias
+correções feitas no escuro que erraram o alvo.
 
-1. **Escolha da janela** (`findForegroundApp`): entre as janelas de
-   aplicativo, ganha a que tem o foco de entrada (o painel flutuante é
-   `FLAG_NOT_FOCUSABLE`, então tocar em "ler tela" não rouba esse foco do
-   app); em seguida, a que tem maior área realmente visível, calculada
-   subtraindo as janelas de camada mais alta; e por fim a ordem Z (`layer`).
-   Os limites da janela escolhida viram o *clip* de tudo que é capturado
-   dela.
-2. **Escolha dos nós** (`collectVisibleContent`): três filtros, em ordem:
-   nós com `isVisibleToUser == false` são descartados junto com sua
-   subárvore; nós cujos limites nem tocam a área da janela na tela também —
-   um painel *deslizado para fora da tela* (o Gmail estaciona a lista de
-   e-mails ao lado da mensagem aberta, no layout de dois painéis que ele usa
-   até em celular) continua se declarando visível, e limites fora da tela
-   nunca são "cobertos" por nada, então o teste de oclusão sozinho não o
-   pega — foi por aí que as tentativas anteriores deixaram a caixa de
-   entrada vazar para a leitura. Por fim, os nós são avaliados do mais
-   acima para o mais abaixo — pela `drawingOrder` real quando o app a
-   informa, senão pela posição entre os irmãos — e um nó coberto pelos
-   *pixels realmente pintados* acima dele é descartado, com tolerância de
-   3% para a tela de trás que aparece por uma fresta. Só conta como
-   pintado o que desenha de fato: nós com texto próprio e folhas sem
-   filhos (imagens, ícones) de até meia janela — os limites de um
-   contêiner **não** são sua área pintada. O Gmail provou isso: um overlay
-   nativo de janela inteira (cabeçalho do remetente, barra de responder)
-   flutua sobre a WebView da mensagem, e tratar os limites do contêiner
-   como cobertura apagava o corpo do e-mail inteiro da leitura. A ordem de
-   leitura em voz alta continua normal: só a *decisão* é feita de cima
-   para baixo.
+### O que os dumps mostraram
 
-O serviço se declara `feedbackSpoken` e `isAccessibilityTool` no XML — não
-é cosmético: WebViews baseadas em Chromium entregam uma árvore de
-acessibilidade reduzida (só controles interativos, sem texto estático) a
-serviços que elas não classificam como leitores de tela, o que aparecia
-como "lê os botões do Gmail mas não o corpo do e-mail".
+Numa mensagem aberta do Gmail, com a caixa de entrada supostamente "viva atrás
+da tela":
 
-A **rolagem automática** usa essa mesma travessia para escolher *o que*
-rolar. Antes ela rolava o primeiro scrollable visível da árvore, que podia
-ser a lista escondida atrás da mensagem — o ciclo seguinte capturava as
-linhas novas da caixa de entrada e as lia misturadas ao e-mail.
+- **A caixa de entrada não estava lá.** `#conversation_list_place_holder` vem
+  com `children=0`. A janela é uma só, e é a da conversa. As tentativas
+  anteriores estavam caçando um fantasma.
+- **Todo o conteúdo de WebView é `isImportantForAccessibility=false`.** O
+  Chromium reporta assim cada nó do corpo do e-mail. Isso torna
+  `flagIncludeNotImportantViews` **obrigatória**: sem ela o sistema poda a
+  árvore inteira e o mesmo e-mail que rende 680 caracteres de texto vira
+  `WebView #conversation_webview … children=0`. O TalkBack passa sem a flag
+  porque nunca lê uma tela em bloco — ele fala o nó sob o dedo, e o Chromium
+  responde a essa consulta pontual.
+- **O que rolava era um pager.** A conversa mora num
+  `androidx.viewpager.widget.ViewPager #item_pager`, que segura as mensagens
+  *vizinhas*. Como o auto-scroll pegava o scrollable mais raso, o alvo era o
+  pager — e `ACTION_SCROLL_FORWARD` nele **passa para o próximo e-mail**. Era
+  isso que fazia a leitura contínua ler uma mensagem, depois outra, com
+  cabeçalho e tudo, parecendo estar presa em loop.
+- **A maior parte do que era falado não era o e-mail.** Dos 29 segmentos
+  capturados, 18 eram cromo: `"Eduardo Bolsonaro condenado Caixa de entrada"`
+  (o nó do assunto termina com o nome da pasta — daí a sensação de "ele lê a
+  tela principal do Gmail"), "Navegar para cima", "Gemini", "Arquivar",
+  "Excluir", "Marcar como não lida", "E-mail, 6 novas notificações",
+  "Reunião". Os 11 restantes eram a mensagem.
+- **E o nome de um container é calculado a partir do conteúdo — e truncado.**
+  Numa newsletter (O Globo/Sonar), o Chromium entregou uma cadeia de
+  `android.view.View` aninhados em que o texto se acumula descendo: o mais
+  externo dizia só `"Facebook Twitter Instagram YouTube"` (34 caracteres) e a
+  carta inteira estava abaixo dele. Como a regra antiga era "nó com texto
+  próprio fala pela subárvore inteira", a captura parava ali: **34 caracteres
+  de um e-mail de 700**, e o `pickMainContent` descartava o WebView por não
+  atingir o mínimo, caindo na janela inteira — que é só cromo. Por isso a
+  decisão entre o texto do pai e o dos filhos passou a ser tomada *depois* de
+  percorrer a subárvore, comparando os dois (`saysEverythingIn` /
+  `isEchoedBy`), e a cobertura exigida do pai é total, não "a maior parte":
+  aceitar 60% descartava silenciosamente o resto da carta.
 
-Se nada sobrar desse filtro — alguns apps reportam `isVisibleToUser` errado
-nos contêineres —, o serviço cai de volta na leitura da árvore inteira, para
-não ficar mudo. Cada nó descartado pelos filtros sai no logcat
-(`collect: dropping …`) com o motivo e os limites, para diagnosticar o
-próximo app que ler errado.
+- **Descrições que repetem os filhos.** Um container do Chromium vinha com
+  `contentDescription` = "Dino e Carmen Lúcia votaram… Eduardo não irá
+  automaticamente p... Ler mais »", e seus três `TextView` filhos carregavam
+  exatamente esses três pedaços. O parágrafo era falado duas vezes, uma
+  inteiro e uma em partes.
+
+### O que o app faz com isso
+
+**Escolha da janela** (`findForegroundApp`): entre as janelas de aplicativo,
+ganha a que tem o foco de entrada (o painel flutuante é `FLAG_NOT_FOCUSABLE`,
+então tocar em "ler tela" não rouba esse foco do app); depois a de maior área
+realmente visível, calculada subtraindo as janelas de camada mais alta; e por
+fim a ordem Z. Os limites da janela viram o *clip* da captura.
+
+**Escolha do conteúdo** (`pickMainContent`): entre os scrollables que
+sobreviveram à travessia, pagers são excluídos de saída — rolar um troca de
+página, não de posição —; entre os que restam, ganha quem anuncia uma ação de
+rolagem *vertical* (`ACTION_SCROLL_DOWN`) e, entre esses, quem tem mais texto.
+Abaixo de 80 caracteres nada se qualifica, e a leitura volta a ser da janela
+inteira. **O mesmo nó escolhido é o que se lê e o que se rola** — era a
+divergência entre os dois que produzia o efeito de loop.
+
+**Filtros da travessia** (`collectVisibleContent`): nós com
+`isVisibleToUser == false` saem com sua subárvore; nós cujos limites não tocam
+a área da janela também — o pager do Gmail estaciona as mensagens vizinhas
+logo além da borda direita, em limites como `[795,64][1486,1290]` numa tela de
+720px, e elas continuam se declarando visíveis. O terceiro filtro, a oclusão
+por pixels pintados, vem **desligado**: é o que uma vez apagou o corpo inteiro
+de um e-mail, confundindo um cabeçalho nativo flutuante com cobertura.
+
+**Contra repetições**: cada nó decide, depois de percorrer sua subárvore, se
+quem lê melhor o mesmo conteúdo é ele ou os filhos — pai quando ele diz tudo
+que os filhos dizem (`saysEverythingIn`, senão a frase sai picada nos spans que
+a compõem), filhos quando eles dizem mais que ele (`isEchoedBy`). Dentro de uma
+mesma captura, um trecho **contido** em outro já falado é eco ou moldura, não
+conteúdo, e sai. Segmentos que são um bloco impronunciável — um token de
+rastreamento, uma URL codificada, qualquer "palavra" de mais de 40 caracteres —
+também saem.
+
+Se nada sobrar dos filtros, o serviço cai de volta na leitura da árvore
+inteira, para não ficar mudo. Cada nó descartado sai no logcat
+(`collect: dropping …`) com o motivo e os limites.
+
+O serviço se declara `feedbackSpoken` e `isAccessibilityTool` no XML — não é
+cosmético: WebViews baseadas em Chromium entregam uma árvore reduzida (só
+controles interativos, sem texto estático) a serviços que elas não classificam
+como leitores de tela.
+
+As três decisões acima são chaves na tela do app (`CaptureTuning`), aplicadas
+ao vivo, para poder comparar comportamentos no aparelho sem recompilar.
 
 Na **rolagem automática**, cada ciclo lê só o que ainda não foi lido: uma
 rolagem raramente avança uma tela inteira e cabeçalhos não se movem, então
@@ -114,14 +160,25 @@ comparação não é literal: WebViews reagrupam seus nós conforme o conteúdo
 rola, e o mesmo texto volta fundido com o vizinho — um trecho também conta
 como lido quando aparece dentro de algo já falado, ou quando algo já falado
 compõe a maior parte dele. A captura pós-rolagem espera 1,2s: os nós da
-WebView reportam os limites antigos por um tempo depois que a rolagem
-assenta.
+WebView reportam os limites antigos por um tempo depois que a rolagem assenta.
 
-Contra **repetições**: um nó com texto próprio fala pela sua subárvore
-inteira (links e títulos de WebView repetem o texto pedaço a pedaço nos
-descendentes — ler os dois níveis era um gaguejo audível), e dentro de uma
-mesma captura uma string repetida é eco ou moldura, não conteúdo: fica só a
-primeira ocorrência, na ordem de leitura.
+## Como diagnosticar um app que lê errado
+
+O botão **🧪 dump** no painel flutuante grava em `Downloads/` a árvore de
+acessibilidade completa de **todas** as janelas da tela que estiver aberta,
+com os campos que decidem tudo: `vis` (`isVisibleToUser`), `IMP`
+(`isImportantForAccessibility`), `bounds`, `drawingOrder`, `paneTitle`,
+`CLICKABLE`, e as ações de rolagem que cada scrollable oferece
+(`SCROLLABLE/DOWN`, `/RIGHT`, `/FWD` — um pager oferece `/FWD` e `/RIGHT` mas
+não `/DOWN`). O cabeçalho registra em que modo o dump foi tirado e qual janela
+o `findForegroundApp` escolheu. Nenhum `adb` necessário.
+
+O dump precisa ser tirado **por cima do app problemático** — o botão mora no
+painel flutuante justamente porque abrir a tela de configurações trocaria a
+tela que interessa. Dois dumps da mesma tela, um em cada modo, mostram o que
+cada chave muda.
+
+Os dumps ficam versionados fora do git, em `captures/`.
 
 ## Privacidade
 

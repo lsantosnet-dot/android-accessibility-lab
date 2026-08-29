@@ -1,6 +1,7 @@
 package com.a11ylab.prototype.capture
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.graphics.Rect
 import android.graphics.Region
@@ -11,6 +12,8 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import android.widget.Toast
+import com.a11ylab.prototype.BuildConfig
 import com.a11ylab.prototype.overlay.OverlayManager
 import com.a11ylab.prototype.reader.MAX_SPEECH_PARAM
 import com.a11ylab.prototype.reader.MEDIA_ACTION_PLAY_PAUSE
@@ -48,6 +51,22 @@ private fun normalizeForDedupe(segment: String) = segment.trim().replace(WHITESP
  * screen for its sliver is exactly the mixed-content bug this filter exists to prevent.
  */
 private const val COVERAGE_TOLERANCE = 0.03
+
+/**
+ * How much text a scrollable must hold to be treated as "the screen's content" rather than
+ * a chrome strip that happens to scroll (a tab bar, a chip row).
+ */
+private const val MIN_MAIN_CONTENT_TEXT = 80
+
+/** Below this, a child segment is too short to count as evidence that an ancestor's text repeats it. */
+private const val MIN_SUMMARY_PIECE_LENGTH = 8
+
+/**
+ * Longer than any word a person says out loud. A "word" this long is a tracking token or an
+ * encoded URL — newsletters are full of them, and a screen reader spelling out
+ * `?qs=ABB7InYiOjEsImQiOjQ5ODN9AAcAAAAABeLWuyyLzGv…` is noise, not content.
+ */
+private const val MAX_SPOKEN_WORD_LENGTH = 40
 
 class CaptureAccessibilityService : AccessibilityService() {
 
@@ -91,6 +110,7 @@ class CaptureAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        applyTreeMode()
         screenReader = ScreenReader(this)
         mediaSessionController = MediaSessionController(this)
         screenReader.onStateChanged = { state, current, total ->
@@ -104,9 +124,71 @@ class CaptureAccessibilityService : AccessibilityService() {
             onSkipForward = { screenReader.skipForward() },
             onSkipBack = { screenReader.skipBack() },
             onToggleAutoScroll = ::toggleAutoScroll,
+            onDumpTree = ::dumpTree,
         )
         overlayManager.show()
         instance = this
+    }
+
+    /**
+     * Puts [AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS] in the state
+     * [CaptureTuning] says it should be in.
+     *
+     * The manifest config leaves the flag off, which is the fix for the Gmail bug: with it
+     * on, the system hands back subtrees an app marked
+     * `IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS` — the standard way to say "this
+     * pane is still mounted but is behind the screen on display, don't read it" — and the
+     * kept-alive inbox arrived in the capture no matter how the geometry was tuned
+     * afterwards. Flipping it back on at runtime is for producing a comparison dump, not
+     * for normal reading.
+     */
+    private fun applyTreeMode() {
+        val info = serviceInfo ?: return
+        val include = CaptureTuning.includeNotImportantViews(this)
+        val updated = if (include) {
+            info.flags or AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+        } else {
+            info.flags and AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS.inv()
+        }
+        if (updated == info.flags) return
+        info.flags = updated
+        serviceInfo = info
+        Log.d(TAG, "applyTreeMode: includeNotImportantViews=$include flags=0x${updated.toString(16)}")
+    }
+
+    /** Writes the raw tree of every window to a file, so a misreading screen can be diagnosed from facts. */
+    private fun dumpTree() {
+        val header = buildString {
+            append("build=").append(BuildConfig.VERSION_NAME).append(' ').append(BuildConfig.BUILD_TIMESTAMP)
+            append('\n')
+            append("modo=")
+            append(
+                if (CaptureTuning.includeNotImportantViews(this@CaptureAccessibilityService)) {
+                    "INSPETOR (inclui views não importantes — o que o uiautomator vê)"
+                } else {
+                    "LEITOR DE TELA (árvore já podada pelo sistema — o que o TalkBack vê)"
+                },
+            )
+            append('\n')
+            append("lerSoConteudoPrincipal=")
+            append(CaptureTuning.readMainContentOnly(this@CaptureAccessibilityService))
+            append(" · filtroOclusaoPixels=")
+            append(CaptureTuning.pixelOcclusionFilter(this@CaptureAccessibilityService))
+            append('\n')
+            val chosen = findForegroundApp()
+            append("janela escolhida por findForegroundApp: ")
+            if (chosen == null) {
+                append("(nenhuma)")
+            } else {
+                append(chosen.root.packageName).append(" bounds=").append(chosen.bounds.toShortString())
+                chosen.root.recycle()
+            }
+            append('\n')
+        }
+        val where = TreeDumper.dump(this, windows, header)
+        val message = if (where == null) "Falha ao salvar o dump" else "Dump salvo em $where"
+        Log.d(TAG, "dumpTree: $message")
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     /** play/pause on the lock-screen card is a single button — decide which action it means from the current state. */
@@ -179,8 +261,18 @@ class CaptureAccessibilityService : AccessibilityService() {
     private fun captureForegroundSegments(): List<String>? {
         val app = findForegroundApp() ?: return null
         val content = collectVisibleContent(app.root, app.bounds)
-        content.scrollables.forEach { it.recycle() }
-        val segments = content.segments
+        val main = pickMainContent(content.scrollables)
+        val segments = if (CaptureTuning.readMainContentOnly(this) && main != null) {
+            Log.d(
+                TAG,
+                "capture: reading main content ${main.className} depth=${main.depth} " +
+                    "chars=${main.textLength} segments=${main.segments.size}",
+            )
+            main.segments.toMutableList()
+        } else {
+            content.segments
+        }
+        content.recycle()
         if (segments.isEmpty()) {
             // Nothing survived the visibility/occlusion filter. Some apps mis-report
             // isVisibleToUser on their container nodes, and reading a possibly-stale screen
@@ -194,9 +286,29 @@ class CaptureAccessibilityService : AccessibilityService() {
         // enough. Within a single capture a repeated string is chrome or echo, not content
         // — keep the first occurrence, in reading order.
         val deduped = mutableListOf<String>()
-        val seen = hashSetOf<String>()
+        val kept = mutableListOf<String>()
         for (segment in segments) {
-            if (seen.add(normalizeForDedupe(segment))) deduped += segment
+            if (isOpaqueToken(segment)) {
+                Log.d(TAG, "capture: dropping opaque token segment of ${segment.length} char(s)")
+                continue
+            }
+            val normalized = normalizeForDedupe(segment)
+            // Containment, not equality: a wrapper's text and the pieces it is made of both
+            // reach this list, and speaking "Facebook Twitter Instagram YouTube" right after a
+            // longer line that already contained it is the echo this removes.
+            //
+            // Only for segments long enough that containment means something, though. A short
+            // one matches by accident: the standalone "35" (an upvote count in the Gmail dump)
+            // is a substring of any paragraph that mentions a year or a figure, and dropping it
+            // would be losing content, not an echo. Short segments need an exact match.
+            val duplicate = if (normalized.length >= MIN_FUZZY_DEDUPE_LENGTH) {
+                kept.any { it.contains(normalized) }
+            } else {
+                kept.any { it == normalized }
+            }
+            if (duplicate) continue
+            deduped += segment
+            kept += normalized
         }
         Log.d(TAG, "captureForegroundSegments: collected ${segments.size} segment(s), ${deduped.size} after dedupe")
         return deduped
@@ -205,25 +317,53 @@ class CaptureAccessibilityService : AccessibilityService() {
     /**
      * Scrolls the container the user is actually looking at. Returns false at the end of content.
      *
-     * The same walk that filters what gets *read* also decides what gets *scrolled*: the first
-     * surviving scrollable (shallowest, in reading order). Picking any visible-flagged scrollable,
-     * the previous behavior, could land on the list a screen kept alive behind the one on display —
-     * Gmail's inbox behind an open message — and auto-scroll would then page the hidden inbox,
-     * feeding its rows into the next capture as "new" content mixed into the message being read.
+     * Auto-scroll used to take the *shallowest* surviving scrollable. On an open Gmail message
+     * that is `androidx.viewpager.widget.ViewPager #item_pager` — the horizontal pager that
+     * holds the neighbouring conversations — and `ACTION_SCROLL_FORWARD` on it swipes to the
+     * **next e-mail** instead of scrolling the message. A dump of a real Gmail message
+     * (`captures/`) showed both scrollables side by side: the pager at depth 9 and the
+     * message WebView at depth 17. That swipe is what made auto-scroll read one message, then
+     * another, headers and all, and sound like it was looping over the same screen.
+     *
+     * [pickMainContent] picks the container with the actual content instead, and the scroll
+     * uses a *vertical* action where the node offers one, so a pager can't be paged even if it
+     * is somehow the only candidate left.
      */
     private fun scrollForward(): Boolean {
         val app = findForegroundApp() ?: return false
         val content = collectVisibleContent(app.root, app.bounds)
-        val fromWalk = content.scrollables.firstOrNull()
+        val target = pickMainContent(content.scrollables)
+            ?: content.scrollables.firstOrNull { !it.isPagerLike }
         // Same safety net as the text side: apps that mis-report visibility leave the walk empty.
-        val legacy = if (fromWalk == null) findAnyScrollableNode(app.root, app.bounds) else null
-        val target = fromWalk ?: legacy
-        val performed = target?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD) ?: false
-        Log.d(TAG, "scrollForward: target=${target?.className} performed=$performed")
-        content.scrollables.forEach { it.recycle() }
+        val legacy = if (target == null) findAnyScrollableNode(app.root, app.bounds) else null
+        val performed = when {
+            target != null -> target.scroll()
+            legacy != null -> legacy.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            else -> false
+        }
+        Log.d(TAG, "scrollForward: target=${target?.className ?: legacy?.className} performed=$performed")
+        content.recycle()
         if (legacy != null && legacy !== app.root) legacy.recycle()
         app.root.recycle()
         return performed
+    }
+
+    /**
+     * Chooses the scrollable that holds the screen's content — the thing to read, and the thing
+     * to scroll.
+     *
+     * Pagers are excluded outright: scrolling one changes *page*, not position. Among what is
+     * left, containers that advertise a vertical scroll win over ones that don't, and then the
+     * one holding the most text — the message body beats a chip row that also scrolls. Below
+     * [MIN_MAIN_CONTENT_TEXT] characters nothing qualifies, so a screen without a real content
+     * container falls back to reading the whole window.
+     */
+    private fun pickMainContent(candidates: List<ScrollableCandidate>): ScrollableCandidate? {
+        val notPagers = candidates.filterNot { it.isPagerLike }
+        if (notPagers.isEmpty()) return null
+        val preferred = notPagers.filter { it.scrollsDown }.ifEmpty { notPagers }
+        val best = preferred.maxWithOrNull(compareBy({ it.textLength }, { it.depth })) ?: return null
+        return best.takeIf { it.textLength >= MIN_MAIN_CONTENT_TEXT }
     }
 
     /** Unfiltered scrollable lookup, the fallback mirror of [collectAllText]. Still skips subtrees
@@ -347,78 +487,92 @@ class CaptureAccessibilityService : AccessibilityService() {
     private class VisibleContent {
         val segments = mutableListOf<String>()
 
-        /** Owned copies, shallowest-first in reading order — every consumer must recycle them. */
-        val scrollables = mutableListOf<AccessibilityNodeInfo>()
-    }
+        /** Owned copies, shallowest-first in reading order — every consumer must call [recycle]. */
+        val scrollables = mutableListOf<ScrollableCandidate>()
 
-    private fun collectVisibleContent(root: AccessibilityNodeInfo, clip: Rect): VisibleContent {
-        val content = VisibleContent()
-        collectVisibleContentInto(root, clip, Region(), content)
-        return content
+        fun recycle() = scrollables.forEach { it.node.recycle() }
     }
 
     /**
-     * Collects the text of everything the user can actually see, one segment per element.
-     *
-     * Picking the right window isn't enough on its own: apps commonly keep a previous screen
-     * mounted inside the *same* window as the one on display. Gmail is the case that keeps
-     * prompting this — the message list stays in the tree under an opened message, so a plain
-     * full-tree walk mixes the inbox into the message. Three filters keep that content out:
-     *
-     * 1. A node reporting `isVisibleToUser == false` is skipped along with its subtree. This
-     *    is the same signal TalkBack uses to decide what is speakable, and it covers screens
-     *    that were hidden (GONE) rather than removed.
-     * 2. A node whose bounds don't touch [clip] — the chosen window's on-screen area — is
-     *    skipped along with its subtree. A pane *slid out of view* (Gmail parks the message
-     *    list beside the open message in its two-pane layout, even on phones) still reports
-     *    itself visible, and off-screen bounds can never be "covered" by anything on screen,
-     *    so the occlusion test below can't catch it — which is how earlier cuts at this
-     *    filter still let the inbox through. All geometry below uses bounds clipped to
-     *    [clip] for the same reason.
-     * 3. Siblings are examined topmost-first — by [AccessibilityNodeInfo.getDrawingOrder]
-     *    where the app reports it, falling back to child index (a View draws over its
-     *    earlier siblings) — and a node whose clipped bounds are covered by the *pixels
-     *    actually painted* above it is skipped. "Covered" tolerates a sliver of
-     *    [COVERAGE_TOLERANCE] left showing, so a screen peeking out from under the one on
-     *    top isn't read whole on account of the peek.
-     *
-     * What counts as painted matters as much as the test. Only nodes that visibly draw
-     * something enter [paintedAbove]: nodes with text of their own, and childless leaves
-     * (images, icons) no bigger than half the window — see [markPainted]. A container's
-     * full bounds are NOT its painted area: Gmail's open message is the case that proved
-     * this, floating a full-window native overlay (the sender header, the reply bar) above
-     * the message WebView, and an earlier revision that counted the overlay's container
-     * bounds as cover blanked the entire message body out of the reading while the header
-     * around it was spoken.
-     *
-     * Only the *decision* is made top-down; each child's segments are merged back in child
-     * order, so the reading order the user hears is unchanged.
-     *
-     * Scrollable nodes on surviving paths are collected along the way, so scrolling targets
-     * the same content reading does.
+     * A scrollable container met during the walk, with everything needed to judge whether it is
+     * *the* content of the screen: how deep it sits, what its subtree yielded, and whether it
+     * advertises a vertical scroll.
      */
-    private fun collectVisibleContentInto(
+    private class ScrollableCandidate(
+        val node: AccessibilityNodeInfo,
+        val className: String,
+        val depth: Int,
+        val segments: List<String>,
+        val scrollsDown: Boolean,
+    ) {
+        val textLength: Int = segments.sumOf { it.length }
+
+        /** A pager scrolls between *pages*, never within one — never a scroll target for reading. */
+        val isPagerLike: Boolean = className.contains("Pager")
+
+        /**
+         * Uses the vertical action when the node offers one. `ACTION_SCROLL_FORWARD` means
+         * "advance", which on a horizontally paged container is a swipe to the next page —
+         * the Gmail bug. `ACTION_SCROLL_DOWN` can only ever mean down.
+         */
+        fun scroll(): Boolean = if (scrollsDown) {
+            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id)
+        } else {
+            node.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        }
+    }
+
+    private fun collectVisibleContent(root: AccessibilityNodeInfo, clip: Rect): VisibleContent =
+        // Read the switch once per capture, not once per node — a walk visits thousands.
+        collectVisibleContent(root, clip, Region(), CaptureTuning.pixelOcclusionFilter(this), depth = 0)
+
+    /**
+     * Collects the text of everything the user can actually see, one segment per element, and
+     * returns it for this subtree so a parent can decide what to do with it.
+     *
+     * Filters, in order:
+     *
+     * 1. A node reporting `isVisibleToUser == false` is skipped along with its subtree. This is
+     *    the same signal TalkBack uses, and it covers screens hidden (GONE) rather than removed.
+     * 2. A node whose bounds don't touch [clip] — the chosen window's on-screen area — is
+     *    skipped along with its subtree. A pane *slid out of view* still reports itself visible:
+     *    Gmail's conversation pager parks the neighbouring messages just off the right edge, at
+     *    bounds like `[795,64][1486,1290]` on a 720px-wide screen.
+     * 3. Optionally (off by default, see [CaptureTuning.pixelOcclusionFilter]) a node whose
+     *    clipped bounds are covered by the pixels painted above it.
+     *
+     * The subtree is always walked, and only then does each node decide whether *its* text or
+     * its children's is the better rendering of the same content. Chromium makes both mistakes
+     * possible on the same screen, so neither level can be trusted a priori:
+     *
+     * - A container's text often repeats its descendants word for word — a Gmail paragraph
+     *   arrived as one node reading "Dino e Carmen Lúcia votaram… Ler mais »" above three
+     *   TextViews carrying exactly those three pieces. Reading both levels is the
+     *   "…recebe essa… recebe essa…" stutter heard in testing, so when the node
+     *   [saysEverythingIn] its children, the children are dropped.
+     * - But a container's name is *computed from its contents and capped*, so an ancestor of a
+     *   long e-mail can carry only part of it: an O Globo newsletter had a wrapper whose entire
+     *   text was "Facebook Twitter Instagram YouTube" sitting above the whole letter. When the
+     *   node is merely [isEchoedBy] its children, the children win — the old rule of "a node
+     *   with text speaks for its subtree" stopped at that wrapper and captured 34 characters of
+     *   a 700-character e-mail.
+     *
+     * Only the *decision* is made top-down; segments are merged back in child order, so the
+     * reading order the user hears is unchanged.
+     */
+    private fun collectVisibleContent(
         node: AccessibilityNodeInfo,
         clip: Rect,
         paintedAbove: Region,
-        into: VisibleContent,
-    ) {
-        if (!node.isVisibleToUser) return
+        occludeByPaintedPixels: Boolean,
+        depth: Int,
+    ): VisibleContent {
+        val content = VisibleContent()
+        if (!node.isVisibleToUser) return content
 
-        // A node with text of its own speaks for its whole subtree. WebView links and
-        // headings carry their text on the node *and* repeat it piece by piece on
-        // descendant nodes; reading both levels was the "…recebe essa… recebe essa…"
-        // stutter heard in testing. Native text views are leaves, so they lose nothing.
         if (node.isPassword) {
-            appendSegment("••••••", into.segments)
-            return
-        }
-        val ownText = node.text?.toString().orEmpty()
-        if (ownText.isNotBlank()) {
-            appendSegment(ownText, into.segments)
-            if (node.isScrollable) into.scrollables += AccessibilityNodeInfo.obtain(node)
-            markPainted(node, ownText, clip, paintedAbove)
-            return
+            appendSegment("••••••", content.segments)
+            return content
         }
 
         val children = (0 until node.childCount).mapNotNull { i -> node.getChild(i)?.let { i to it } }
@@ -435,29 +589,113 @@ class CaptureAccessibilityService : AccessibilityService() {
             val onScreen = childBounds.isEmpty || clipped.intersect(clip)
             if (!onScreen) {
                 Log.d(TAG, "collect: dropping off-screen ${child.className} at $childBounds")
-            } else if (!childBounds.isEmpty && isEffectivelyCovered(clipped, paintedAbove)) {
+            } else if (
+                occludeByPaintedPixels &&
+                !childBounds.isEmpty &&
+                isEffectivelyCovered(clipped, paintedAbove)
+            ) {
                 Log.d(TAG, "collect: dropping covered ${child.className} at $clipped")
             } else {
-                val content = VisibleContent()
-                collectVisibleContentInto(child, clip, paintedAbove, content)
-                childContent[index] = content
+                childContent[index] =
+                    collectVisibleContent(child, clip, paintedAbove, occludeByPaintedPixels, depth + 1)
             }
             child.recycle()
         }
 
-        val direct = extractText(node)
-        appendSegment(direct, into.segments)
-        if (node.isScrollable) into.scrollables += AccessibilityNodeInfo.obtain(node)
-        for (content in childContent) {
-            content ?: continue
-            content.segments.forEach { appendSegment(it, into.segments) }
-            into.scrollables += content.scrollables
+        val fromChildren = mutableListOf<String>()
+        for (sub in childContent) {
+            sub ?: continue
+            sub.segments.forEach { appendSegment(it, fromChildren) }
+        }
+
+        val ownText = extractText(node)
+        when {
+            ownText.isBlank() -> fromChildren.forEach { appendSegment(it, content.segments) }
+
+            // Nothing below to compare against: this node is the text.
+            fromChildren.isEmpty() -> appendSegment(ownText, content.segments)
+
+            // The node already says everything its subtree says, so it is the deepest level
+            // that still reads as whole phrases. Descending further would only chop a
+            // sentence into the inline spans it happens to be built from.
+            saysEverythingIn(ownText, fromChildren) -> appendSegment(ownText, content.segments)
+
+            // The subtree says more than this node does. Chromium computes a container's
+            // name from its contents and caps it, so an ancestor of a long newsletter can
+            // carry a *partial* name — the O Globo dump had a wrapper whose whole text was
+            // "Facebook Twitter Instagram YouTube" sitting above the entire letter. Stopping
+            // there, which is what the old "own text wins" rule did, threw the e-mail away.
+            isEchoedBy(ownText, fromChildren) ->
+                fromChildren.forEach { appendSegment(it, content.segments) }
+
+            // Disjoint: both are real content.
+            else -> {
+                appendSegment(ownText, content.segments)
+                fromChildren.forEach { appendSegment(it, content.segments) }
+            }
+        }
+
+        if (node.isScrollable) content.scrollables += candidateFor(node, depth, content.segments)
+        for (sub in childContent) {
+            sub ?: continue
+            content.scrollables += sub.scrollables
         }
 
         // A node's own pixels join the painted region only after its subtree ran: a View's
         // background sits *under* its children, and must not count as cover for them —
         // only for the siblings (and their subtrees) below this node in drawing order.
-        markPainted(node, direct, clip, paintedAbove)
+        if (occludeByPaintedPixels) markPainted(node, ownText, clip, paintedAbove)
+        return content
+    }
+
+    private fun candidateFor(node: AccessibilityNodeInfo, depth: Int, segments: List<String>) =
+        ScrollableCandidate(
+            node = AccessibilityNodeInfo.obtain(node),
+            className = node.className?.toString().orEmpty(),
+            depth = depth,
+            segments = segments.toList(),
+            scrollsDown = node.actionList.contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN),
+        )
+
+    /**
+     * Whether [text] already contains every substantial thing [childSegments] say — i.e. this
+     * node is a complete rendering of its own subtree, and reading the children too would only
+     * repeat it in pieces (the "…recebe essa… recebe essa…" stutter heard in early testing).
+     *
+     * "Every", not "most": an earlier cut at this accepted 60% coverage and silently dropped
+     * the rest of a newsletter that its container's text didn't happen to include.
+     */
+    private fun saysEverythingIn(text: String, childSegments: List<String>): Boolean {
+        val whole = normalizeForDedupe(text)
+        return childSegments
+            .map(::normalizeForDedupe)
+            .filter { it.length >= MIN_SUMMARY_PIECE_LENGTH }
+            .all { whole.contains(it) }
+    }
+
+    /** Whether [childSegments] between them already say everything [text] says — then they are the fuller source. */
+    private fun isEchoedBy(text: String, childSegments: List<String>): Boolean {
+        val whole = normalizeForDedupe(text)
+        if (whole.length < MIN_FUZZY_DEDUPE_LENGTH) return childSegments.isNotEmpty()
+        return childSegments.joinToString(" ") { normalizeForDedupe(it) }.contains(whole)
+    }
+
+    /**
+     * True for a segment that is *mostly* one unpronounceable blob — a tracking token, an
+     * encoded URL. The O Globo newsletter contributed a 139-character `?qs=ABB7InYiOjEs…`
+     * that would otherwise be spelled out loud.
+     *
+     * Deliberately not "contains a long word": a real sentence that happens to quote a long
+     * link is still a sentence, and dropping it whole would lose content — the exact failure
+     * mode this whole filter chain exists to avoid.
+     */
+    private fun isOpaqueToken(segment: String): Boolean {
+        val words = segment.split(WHITESPACE).filter { it.isNotBlank() }
+        if (words.isEmpty()) return false
+        val opaque = words.filter { it.length > MAX_SPOKEN_WORD_LENGTH }
+        if (opaque.isEmpty()) return false
+        val opaqueChars = opaque.sumOf { it.length }
+        return opaqueChars * 10 >= segment.length * 6
     }
 
     /**
@@ -570,6 +808,26 @@ class CaptureAccessibilityService : AccessibilityService() {
                 MEDIA_ACTION_SKIP_PREVIOUS -> service.screenReader.skipBack()
                 MEDIA_ACTION_STOP -> service.stopReading()
             }
+        }
+
+        /**
+         * Switches between the screen-reader tree and the inspector tree, live if the service
+         * is running. Off (the default) is what makes an open Gmail message read as just the
+         * message; on is only for producing a comparison dump.
+         */
+        fun setIncludeNotImportantViews(context: Context, value: Boolean) {
+            CaptureTuning.setIncludeNotImportantViews(context, value)
+            instance?.applyTreeMode()
+        }
+
+        /** Turns the painted-pixel occlusion pass on or off; takes effect on the next capture. */
+        fun setPixelOcclusionFilter(context: Context, value: Boolean) {
+            CaptureTuning.setPixelOcclusionFilter(context, value)
+        }
+
+        /** Restricts reading to the screen's content container, or opens it back up to the whole window. */
+        fun setReadMainContentOnly(context: Context, value: Boolean) {
+            CaptureTuning.setReadMainContentOnly(context, value)
         }
 
         /** Adjusts speech rate by [delta], live if the service is running, or persisted for its next start otherwise. */

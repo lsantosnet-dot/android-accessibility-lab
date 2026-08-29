@@ -34,6 +34,7 @@ class OverlayManager(
     private val onSkipForward: () -> Unit,
     private val onSkipBack: () -> Unit,
     private val onToggleAutoScroll: () -> Unit,
+    private val onDumpTree: () -> Unit,
 ) {
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -197,12 +198,26 @@ class OverlayManager(
             orientation = LinearLayout.HORIZONTAL
             setPadding(dpToPx(12), dpToPx(2), dpToPx(12), dpToPx(8))
 
+            // Both share the row evenly: the panel is only 220dp wide, and two
+            // default-width buttons side by side would clip.
+            fun half() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+
             val closeButton = Button(context).apply {
                 text = "✕ fechar"
                 setOnClickListener { close() }
+                layoutParams = half()
+            }
+            // Writes the raw accessibility tree of every window to a file. Lives on the panel
+            // rather than in the app's screen because the tree that matters is the one on the
+            // *other* app's screen — opening the settings Activity would replace it.
+            val dumpButton = Button(context).apply {
+                text = "🧪 dump"
+                setOnClickListener { onDumpTree() }
+                layoutParams = half()
             }
 
             addView(closeButton)
+            addView(dumpButton)
         }
 
         return LinearLayout(context).apply {
